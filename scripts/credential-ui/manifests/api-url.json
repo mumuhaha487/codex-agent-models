@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "id": "codex-custom-subagent-api-url",
+  "label": "自定义 Agent API URL",
+  "credential": "codex-custom-subagent/setup/api-url",
+  "ui": {
+    "title": "配置自定义 Codex 子 Agent",
+    "placeholder": "例如 https://gateway.example.com/v1",
+    "saveLabel": "保存"
+  }
+}

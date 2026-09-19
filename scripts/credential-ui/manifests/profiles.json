@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "profiles": {
+    "default": [
+      {
+        "manifest": "api-url.json",
+        "env": "CUSTOM_AGENT_BASE_URL"
+      },
+      {
+        "manifest": "default.json",
+        "env": "CUSTOM_AGENT_API_KEY"
+      },
+      {
+        "manifest": "model.json",
+        "env": "CUSTOM_AGENT_MODEL"
+      }
+    ]
+  }
+}

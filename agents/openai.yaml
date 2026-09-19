@@ -1,0 +1,4 @@
+interface:
+  display_name: "Codex Custom Subagent"
+  short_description: "安全配置任意 Responses 模型并执行只读补丁验收"
+  default_prompt: "使用 $codex-custom-subagent，通过本机安全页面配置 URL、Key 与模型，并让主 Agent 按计划派发、验收和应用子 Agent 的候选补丁。"

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "id": "codex-custom-subagent-api-key",
+  "label": "自定义 Agent API Key",
+  "credential": "codex-custom-subagent/setup/api-key",
+  "ui": {
+    "title": "配置自定义 Codex 子 Agent",
+    "placeholder": "粘贴 API Key",
+    "saveLabel": "保存"
+  }
+}
