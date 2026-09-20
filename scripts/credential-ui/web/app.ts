@@ -1,4 +1,5 @@
-type Field = { id: string; label: string; credential: string; revision: string; configured: boolean; storage: string; ui?: { title?: string; placeholder?: string; saveLabel?: string } };
+type InputType = 'password' | 'url' | 'text';
+type Field = { id: string; label: string; credential: string; revision: string; configured: boolean; storage: string; ui?: { title?: string; placeholder?: string; saveLabel?: string; inputType?: InputType } };
 type Metadata = { fields: Field[]; page: { title?: string; label?: string; saveLabel?: string }; outcome: string };
 type SaveResult = { status: string; results?: { credential: string; status: string }[] };
 const get = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -34,6 +35,9 @@ function update() {
 function render() {
   clearInputs(); inputs = [];
   const multi = meta.fields.length > 1;
+  const allPassword = meta.fields.every(field => (field.ui?.inputType ?? 'password') === 'password');
+  const firstFieldTitle = meta.fields[0].ui?.title;
+  const sharedFieldTitle = firstFieldTitle && meta.fields.every(field => field.ui?.title === firstFieldTitle) ? firstFieldTitle : undefined;
   form.classList.toggle('multi', multi);
   const container = get('fields'); container.replaceChildren();
   meta.fields.forEach((field, index) => {
@@ -43,15 +47,19 @@ function render() {
     if (field.configured) {
       const state = document.createElement('span'); state.className = 'field-state'; state.textContent = '已配置'; label.append(state);
     }
-    const input = document.createElement('input'); input.id = label.htmlFor; input.type = 'password';
-    input.autocomplete = 'new-password'; input.autocapitalize = 'off'; input.spellcheck = false; input.maxLength = 2500;
+    const inputType = field.ui?.inputType ?? 'password';
+    const input = document.createElement('input'); input.id = label.htmlFor; input.type = inputType;
+    input.setAttribute('autocomplete', inputType === 'password' ? 'new-password' : inputType === 'url' ? 'url' : 'off');
+    input.autocapitalize = 'off'; input.spellcheck = false; input.maxLength = 2500;
     input.required = !field.configured; input.setAttribute('aria-describedby', 'hint message');
-    input.placeholder = field.configured ? '留空保留，输入则替换' : (field.ui?.placeholder ?? '粘贴 API Key');
+    const fallback = inputType === 'password' ? '粘贴 API Key' : inputType === 'url' ? '输入 API URL' : '输入配置值';
+    input.placeholder = field.configured ? '留空保留，输入则替换' : (field.ui?.placeholder ?? fallback);
     input.disabled = !['waiting', 'partial'].includes(meta.outcome);
     wrapper.append(label, input); container.append(wrapper); inputs.push(input);
   });
-  get('context').textContent = meta.page.label ?? (multi ? meta.fields.length + ' 项凭据' : meta.fields[0].label);
-  const title = meta.page.title ?? (multi ? '输入密钥' : meta.fields[0].ui?.title) ?? '输入密钥';
+  get('context').textContent = meta.page.label ?? (multi ? meta.fields.length + (allPassword ? ' 项凭据' : ' 项配置') : meta.fields[0].label);
+  const fallbackTitle = allPassword ? '输入密钥' : '输入配置';
+  const title = meta.page.title ?? (multi ? sharedFieldTitle : meta.fields[0].ui?.title) ?? fallbackTitle;
   get('heading').textContent = title; document.title = title;
   const storage = [...new Set(meta.fields.map(field => field.storage))].join('、');
   get('hint').textContent = '仅保存到' + storage + (meta.fields.some(field => field.configured) ? ' · 已配置项留空保留' : '');

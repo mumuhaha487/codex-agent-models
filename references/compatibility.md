@@ -35,9 +35,9 @@ spawn_agent(agent_type="CustomAgent", fork_turns="none", ...)
 
 ## URL 与凭据
 
-URL 只允许 HTTPS，或 localhost、回环、私有网络 IP 上的 HTTP；禁止 URL 内嵌凭据、查询参数和片段。Key 可采用任意服务格式，但必须为非空、长度不超过 2500 的单行值。
+URL 只允许 HTTPS，或 localhost、回环、私有网络 IP 上的 HTTP；禁止 URL 内嵌凭据、查询参数和片段。使用用户或网关给出的精确 Base URL，不自行追加 `/v1` 或任何其他路径；用户提供的合法路径会保留，仅末尾斜杠被规范化。Key 可采用任意服务格式，但必须为非空、长度不超过 2500 的单行值。
 
-URL、Key 和模型 ID 由用户在本机页面填写，并分别以 `CUSTOM_AGENT_BASE_URL`、`CUSTOM_AGENT_API_KEY`、`CUSTOM_AGENT_MODEL` 注入。不要在回复、日志摘要、异常或测试夹具中重复 Key。
+URL、Key 和模型 ID 由用户在本机页面填写，并分别以 `CUSTOM_AGENT_BASE_URL`、`CUSTOM_AGENT_API_KEY`、`CUSTOM_AGENT_MODEL` 注入。URL 和模型字段可见，Key 字段遮蔽；任何字段都不从后端回填。不要在回复、日志摘要、异常或测试夹具中重复 Key。
 
 ## 配置事务
 

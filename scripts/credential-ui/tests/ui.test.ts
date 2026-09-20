@@ -7,20 +7,22 @@ import { readFile } from 'node:fs/promises';
 class Element {
   children: Element[] = [];
   value = ''; textContent = ''; hidden = false; disabled = false; type = ''; required = false; placeholder = '';
-  className = ''; id = ''; htmlFor = '';
+  className = ''; id = ''; htmlFor = ''; autocomplete = '';
   listeners: Record<string, (event: object) => unknown> = {};
   classes = new Set<string>();
   classList = { toggle: (key: string, enabled: boolean) => enabled ? this.classes.add(key) : this.classes.delete(key) };
   append(...children: Element[]) { this.children.push(...children); }
   replaceChildren() { this.children = []; }
-  setAttribute() {}
+  setAttribute(name: string, value: string) { if (name === 'autocomplete') this.autocomplete = value; }
   addEventListener(event: string, callback: (event: object) => unknown) { this.listeners[event] = callback; }
 }
-async function harness(configured = false, fail = false) {
+async function harness(configured = false, fail = false, inputTypes: Array<'password' | 'url' | 'text' | undefined> = [undefined, undefined],
+  page: { title?: string; label?: string; saveLabel?: string } = { title: '连接服务', label: '两个服务', saveLabel: '确认保存' }, fieldTitle?: string) {
   const nodes = Object.fromEntries(['credential-form', 'fields', 'save', 'heading', 'context', 'hint', 'message'].map(key => [key, new Element()]));
-  const fields = [0, 1].map(index => ({ id: 'sample', label: index ? '<img src=x>' : '语音服务', credential: 'sample/' + index,
-    configured: index === 0 && configured, revision: 'revision-' + index, storage: '测试凭据库', ui: { placeholder: '测试输入' } }));
-  const metadata = { fields, page: { title: '连接服务', label: '两个服务', saveLabel: '确认保存' }, outcome: 'waiting' };
+  const fields = inputTypes.map((inputType, index) => ({ id: 'sample', label: index ? '<img src=x>' : '语音服务', credential: 'sample/' + index,
+    configured: index === 0 && configured, revision: 'revision-' + index, storage: '测试凭据库',
+    ui: { placeholder: '测试输入', ...(inputType ? { inputType } : {}), ...(fieldTitle ? { title: fieldTitle } : {}) } }));
+  const metadata = { fields, page, outcome: 'waiting' };
   const submitted: any[] = [];
   const lifecycle: Record<string, () => void> = {};
   const context = { document: { getElementById: (id: string) => nodes[id], createElement: () => new Element(), title: '' },
@@ -47,10 +49,28 @@ test('真实前端产物：配置生成两个密码框、纯文本标签、必�
   assert.equal(h.inputs().length, 2); assert.ok(h.inputs().every(input => input.type === 'password' && input.required));
   assert.equal(h.nodes.fields.children[1].children[0].textContent, '<img src=x>');
   assert.equal(h.nodes.heading.textContent, '连接服务');
+  assert.equal(h.nodes.context.textContent, '两个服务');
   h.inputs()[0].value = 'FAKE_ONE'; h.input(); assert.equal(h.nodes.save.disabled, true);
   h.inputs()[1].value = 'FAKE_TWO'; h.input(); assert.equal(h.nodes.save.disabled, false);
   await h.submit(); assert.equal(h.submitted[0].entries.length, 2);
   assert.ok(h.inputs().every(input => !input.value)); assert.equal(h.nodes['credential-form'].hidden, true);
+});
+test('真实前端产物：缺省为密码框，URL 和文本字段明文显示且不使用密码自动完成', async () => {
+  const h = await harness(false, false, [undefined, 'url', 'text']);
+  assert.deepEqual(h.inputs().map(input => input.type), ['password', 'url', 'text']);
+  assert.deepEqual(h.inputs().map(input => input.autocomplete), ['new-password', 'url', 'off']);
+  assert.ok(h.inputs().every(input => input.value === ''));
+});
+test('真实前端产物：混合配置页使用共同字段标题与配置语义的 context', async () => {
+  const h = await harness(false, false, ['url', 'password', 'text'], {}, '配置自定义 Codex 子 Agent');
+  assert.equal(h.nodes.heading.textContent, '配置自定义 Codex 子 Agent');
+  assert.equal(h.nodes.context.textContent, '3 项配置');
+  const fallback = await harness(false, false, ['url', 'password', 'text'], {});
+  assert.equal(fallback.nodes.heading.textContent, '输入配置');
+  assert.equal(fallback.nodes.context.textContent, '3 项配置');
+  const secrets = await harness(false, false, [undefined, 'password'], {});
+  assert.equal(secrets.nodes.heading.textContent, '输入密钥');
+  assert.equal(secrets.nodes.context.textContent, '2 项凭据');
 });
 test('真实前端产物：已有项留空保留，替换按钮明确，离开清空', async () => {
   const h = await harness(true);

@@ -1,6 +1,6 @@
 # 可复用凭据输入页
 
-供本机桌面 Skill 配置 API Key、访问令牌等单行凭据。一个 Key 使用紧凑单输入框，多个 Key 在同页纵向排列，共用一个保存按钮。页面默认黑白灰，密钥只存系统凭据库。
+供本机桌面 Skill 配置 API Key、访问令牌以及与其同页提交的单行 URL/文本值。页面默认黑白灰，所有值只存系统凭据库。
 
 ## 适用范围
 
@@ -35,11 +35,11 @@ npm start
   "id": "sample-skill",
   "label": "服务 API Key",
   "credential": "sample-skill/service/default",
-  "ui": { "title": "输入密钥", "placeholder": "粘贴你的密钥", "saveLabel": "保存" }
+  "ui": { "title": "输入密钥", "placeholder": "粘贴你的密钥", "saveLabel": "保存", "inputType": "password" }
 }
 ```
 
-id、label、credential 必填，ui 可省略。每项只接受非空单行密钥，最长 2500 个字符；系统后端的容量限制仍可能更低，失败时不会改存明文文件。密钥值不属于声明字段。
+id、label、credential 必填，ui 可省略。`ui.inputType` 只允许 `password`、`url` 或 `text`，缺省为 `password`；CLI 对应 `--input-type`。URL 使用 `autocomplete=url`，普通文本关闭自动完成，只有密码字段使用 `new-password`。每项只接受非空单行值，最长 2500 个字符；系统后端的容量限制仍可能更低，失败时不会改存明文文件。值本身不属于声明字段。
 
 ## 同页填写多个 Key
 
@@ -86,7 +86,7 @@ npm run configure-page -- --page manifests/setup.page.json --title "配置服务
 
 ## 保存与恢复
 
-尚未配置项必填；已有项显示“已配置”，留空保留，输入新值才替换。原值不会回填页面。替换按钮固定显示“替换并保存”，自定义文案不能覆盖这一提示。
+尚未配置项必填；已有项显示“已配置”，留空保留，输入新值才替换。无论输入类型是否明文，原值都不会从后端回填页面。替换按钮固定显示“替换并保存”，自定义文案不能覆盖这一提示。
 
 整组预检通过后顺序保存。系统凭据库没有跨项事务：中途失败保留成功项、停止后续写入，并逐项标明结果，不自动回滚。用户先核对状态，再补填未完成项；后端报错可能存在结果不确定的情况，不能据此断言未写入。
 

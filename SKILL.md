@@ -11,12 +11,12 @@ description: "配置、维护并使用一个由用户指定 Responses API URL、
 
 首次配置或更换服务时，先读 [API URL、Key 与模型配置](references/api-key-setup.md)。API URL、API Key 和精确模型 ID 都由用户在随附本机安全页面中填写，再由包装器注入业务进程；不要让用户把这些值贴进聊天，也不要把 Key 放进命令参数、日志或普通文件。
 
-网关必须兼容 OpenAI Responses API，并支持 Codex 所需的工具调用。API URL 是实际 API 前缀；HTTP 只允许 localhost、回环或私有网络 IP，公网端点必须使用 HTTPS。兼容性和 Provider 继承规则见 [references/compatibility.md](references/compatibility.md)。
+网关必须兼容 OpenAI Responses API，并支持 Codex 所需的工具调用。API URL 必须是用户或网关给出的精确 Base URL；不得猜测或自行追加 `/v1` 或其他路径，但必须保留用户明确提供的合法路径。HTTP 只允许 localhost、回环或私有网络 IP，公网端点必须使用 HTTPS。兼容性和 Provider 继承规则见 [references/compatibility.md](references/compatibility.md)。
 
 ## 配置流程
 
 1. 运行 `status --json`，根据结构化状态继续。
-2. 缺少 URL、Key 或模型时，启动随附本机页面让用户填写三项；不要自动操作页面。
+2. 缺少 URL、Key 或模型时，启动随附本机页面让用户填写三项；URL 和模型使用明文输入框，Key 使用密码框，但三项都不回填已保存值。不要自动操作页面。
 3. 经 `profile.ts run default` 包装入口运行 `setup --base-url-env --api-key-env --model-env --json`。
 4. `setup`、`repair` 和 `test` 使用桌面内置 Codex 运行时。若返回 `new_task_required` 或 `restart_required`，提示用户重启 Codex 并打开新任务。
 5. 验收必须同时通过直连口令 `CUSTOM_AGENT_DIRECT_OK`、原生口令 `NATIVE_CUSTOM_AGENT_OK`，以及子线程数据库中的实际 Provider、精确模型、`high` 思考程度和 `CustomAgent` 角色。

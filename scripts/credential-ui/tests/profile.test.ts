@@ -14,6 +14,7 @@ test('真实分发配置：正式页面保存后可被对应业务环境读取�
   for (const name of Object.keys(config.profiles)) {
     const bindings = await loadProfile(name);
     const manifests = await Promise.all(bindings.map(b => loadManifest(b.manifest)));
+    assert.deepEqual(manifests.map(manifest => manifest.ui?.inputType ?? 'password'), ['url', 'password', 'text']);
     const values = new Map<string, string>();
     const backendFactory = async (ref: string): Promise<CredentialBackend> => ({
       name: 'fake', get: async () => values.get(ref),
@@ -28,6 +29,9 @@ test('真实分发配置：正式页面保存后可被对应业务环境读取�
       const meta = await (await fetch(app.origin + '/api/meta', { headers })).json();
       const saved = await fetch(app.origin + '/api/save', { method: 'POST', headers, body: JSON.stringify({ entries: meta.fields.map((f: { credential: string; revision: string }, i: number) => ({ credential: f.credential, revision: f.revision, value: 'TEST_ONLY_PROFILE_' + i })) }) });
       assert.equal((await saved.json()).status, 'saved');
+      const savedMeta = await (await fetch(app.origin + '/api/meta', { headers })).json();
+      assert.equal(JSON.stringify(savedMeta).includes('TEST_ONLY_PROFILE_'), false);
+      assert.deepEqual(savedMeta.fields.map((field: { ui?: { inputType?: string } }) => field.ui?.inputType ?? 'password'), ['url', 'password', 'text']);
       const status = await profileStatus(bindings, {}, async ref => values.get(ref));
       assert.equal(status.configured, true);
       assert.equal(JSON.stringify(status).includes('TEST_ONLY'), false);

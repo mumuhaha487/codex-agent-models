@@ -11,7 +11,7 @@
     {
       "id": 2,
       "prompt": "用我自己的 Responses 网关和任意模型配置原生子 Agent，密钥不要发到聊天。",
-      "expected_output": "使用同一本机安全页面收集 URL、API Key 和精确模型 ID，再以三个 --*-env 参数经包装器运行 setup；不要求 Key 使用特定前缀，不回显或明文保存 Key。",
+      "expected_output": "使用同一本机安全页面收集 URL、API Key 和精确模型 ID，URL/模型为明文输入、Key 为密码输入且都不回填；使用用户给出的精确 Base URL，不自行追加 /v1 或其他路径，但保留用户给出的合法路径；再以三个 --*-env 参数经包装器运行 setup；不要求 Key 使用特定前缀，不回显或明文保存 Key。",
       "files": [],
       "name": "通用端点三字段安全配置"
     },

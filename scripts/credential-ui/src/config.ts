@@ -6,9 +6,10 @@ export class PublicError extends Error {
   status: number;
   constructor(message: string, status = 400) { super(message); this.status = status; }
 }
+export type InputType = 'password' | 'url' | 'text';
 export type Manifest = {
   version: 1; id: string; label: string; credential: string;
-  ui?: { title?: string; placeholder?: string; saveLabel?: string };
+  ui?: { title?: string; placeholder?: string; saveLabel?: string; inputType?: InputType };
 };
 export const object = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
 export async function loadManifest(file: string): Promise<Manifest> {
@@ -21,9 +22,12 @@ export function validateManifest(m: unknown): Manifest {
     || typeof m.label !== 'string' || !m.label.trim() || m.label.length > 120
     || typeof m.credential !== 'string' || !/^[a-z0-9][a-z0-9/_.-]{0,150}$/.test(m.credential)
     || Object.keys(m).some(k => !['version', 'id', 'label', 'credential', 'ui'].includes(k))) throw new PublicError('配置声明不合法。');
-  if (m.ui !== undefined && (!object(m.ui) || Object.entries(m.ui).some(([k, v]) =>
-    !['title', 'placeholder', 'saveLabel'].includes(k) || typeof v !== 'string' || !v.trim() || v.length > 80)))
-    throw new PublicError('页面配置不合法。');
+  if (m.ui !== undefined) {
+    if (!object(m.ui) || Object.entries(m.ui).some(([k, v]) =>
+      !['title', 'placeholder', 'saveLabel', 'inputType'].includes(k) || typeof v !== 'string' || !v.trim() || v.length > 80)
+      || (m.ui.inputType !== undefined && !['password', 'url', 'text'].includes(m.ui.inputType as string)))
+      throw new PublicError('页面配置不合法。');
+  }
   return m as Manifest;
 }
 export interface CredentialBackend {

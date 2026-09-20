@@ -5,7 +5,8 @@
   "credential": "codex-custom-subagent/setup/api-url",
   "ui": {
     "title": "配置自定义 Codex 子 Agent",
-    "placeholder": "例如 https://gateway.example.com/v1",
+    "placeholder": "例如 https://gateway.example.com",
+    "inputType": "url",
     "saveLabel": "保存"
   }
 }

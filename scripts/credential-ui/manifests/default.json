@@ -6,6 +6,7 @@
   "ui": {
     "title": "配置自定义 Codex 子 Agent",
     "placeholder": "粘贴 API Key",
+    "inputType": "password",
     "saveLabel": "保存"
   }
 }

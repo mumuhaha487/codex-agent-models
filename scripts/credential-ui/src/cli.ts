@@ -27,7 +27,7 @@ export async function configurePage(file: string, manifests: string[], options: 
   // 命令参数按当前目录解析；写入页面文件后统一保存为相对该文件的路径。
   const paths = manifests.length ? manifests.map(item => path.relative(path.dirname(file), path.resolve(item)).split(path.sep).join('/')) : existing?.manifests ?? [];
   validateFields(await Promise.all(paths.map(item => loadManifest(path.resolve(path.dirname(file), item)))));
-  const ui = { ...existing?.ui };
+  const ui: Record<string, string> = { ...existing?.ui };
   for (const [flag, key] of [['title', 'title'], ['label', 'label'], ['save-label', 'saveLabel']])
     if (options[flag] !== undefined) ui[key] = options[flag];
   const configuration = { version: 1, manifests: paths, ui: validatePageUI(ui) };
@@ -36,7 +36,7 @@ export async function configurePage(file: string, manifests: string[], options: 
 }
 
 export async function configureManifest(file: string, options: Record<string, string>, dryRun = false) {
-  const allowed = ['id', 'label', 'credential', 'title', 'placeholder', 'save-label'];
+  const allowed = ['id', 'label', 'credential', 'title', 'placeholder', 'save-label', 'input-type'];
   if (Object.keys(options).some(k => !allowed.includes(k))) throw new PublicError('存在不支持的配置项。');
   let existing: Manifest | undefined;
   try {
@@ -48,8 +48,8 @@ export async function configureManifest(file: string, options: Record<string, st
     throw new PublicError('已有声明的身份和凭据引用不可改写。请为新凭据指定新的 --manifest 文件。');
   const draft: Record<string, unknown> = { version: 1, ...existing };
   for (const key of ['id', 'label', 'credential']) if (options[key] !== undefined) draft[key] = options[key];
-  const ui = { ...existing?.ui };
-  for (const [flag, key] of [['title', 'title'], ['placeholder', 'placeholder'], ['save-label', 'saveLabel']] as const)
+  const ui: Record<string, string> = { ...existing?.ui };
+  for (const [flag, key] of [['title', 'title'], ['placeholder', 'placeholder'], ['save-label', 'saveLabel'], ['input-type', 'inputType']] as const)
     if (options[flag] !== undefined) ui[key] = options[flag];
   if (Object.keys(ui).length) draft.ui = ui;
   const manifest = validateManifest(draft);
@@ -59,7 +59,7 @@ export async function configureManifest(file: string, options: Record<string, st
 async function main() {
   const [command, ...args] = process.argv.slice(2);
   if (!command || command === '--help') {
-    process.stdout.write('configure [--manifest 文件] --id 标识 --label 用途 --credential 引用 [--title 标题] [--placeholder 占位文字] [--save-label 按钮文字] [--dry-run]\nconfigure-page --page 文件 [--manifest 声明（可重复，替换整组）] [--title 标题] [--label 用途] [--save-label 按钮文字] [--dry-run]\nstatus [--manifest 文件]\n');
+    process.stdout.write('configure [--manifest 文件] --id 标识 --label 用途 --credential 引用 [--title 标题] [--placeholder 占位文字] [--save-label 按钮文字] [--input-type password|url|text] [--dry-run]\nconfigure-page --page 文件 [--manifest 声明（可重复，替换整组）] [--title 标题] [--label 用途] [--save-label 按钮文字] [--dry-run]\nstatus [--manifest 文件]\n');
     return;
   }
   const flags: Record<string, string> = {};
