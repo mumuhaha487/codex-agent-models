@@ -1,4 +1,4 @@
 interface:
   display_name: "deepseek"
-  short_description: "安全配置 DeepSeek Responses 子 Agent 并执行只读补丁验收"
-  default_prompt: "使用 $deepseek，通过本机安全页面配置 URL、Key 与模型，并让主 Agent 按计划派发、验收和应用子 Agent 的候选补丁。"
+  short_description: "配置继承父 Provider 的 DeepSeek 子 Agent、思考强度与识图能力"
+  default_prompt: "使用 $deepseek，通过本机设置页配置子代理模型、思考强度和识图能力，并让主 Agent 按计划派发、验收和应用候选补丁。"

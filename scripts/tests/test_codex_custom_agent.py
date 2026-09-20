@@ -19,96 +19,125 @@ sys.modules[SPEC.name] = MANAGER
 SPEC.loader.exec_module(MANAGER)
 
 
-class SetupCredentialTransactionTests(unittest.TestCase):
+class SetupConfigurationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.paths = MANAGER.resolve_paths(self.temporary.name)
-        self.base_args = (
-            self.paths,
-            "unused-codex",
-            False,
-            True,
-            "vendor-model",
-            "https://gateway.example/v1",
-        )
         self.install_result = {
             "backup": str(Path(self.temporary.name) / "backup"),
             "selected_model": "vendor-model",
-            "base_url": "https://gateway.example/v1/",
+            "reasoning_effort": "medium",
+            "supports_vision": True,
         }
 
-    def test_existing_key_is_replaced_when_env_is_explicit(self) -> None:
-        writes: list[str] = []
+    def test_environment_values_are_forwarded_without_touching_credentials(self) -> None:
         with (
-            patch.dict(os.environ, {"CUSTOM_AGENT_API_KEY": "replacement-key"}),
-            patch.object(MANAGER, "credential_available", return_value=True),
-            patch.object(MANAGER, "credential_has_key", return_value=True),
-            patch.object(MANAGER, "read_credential_key", return_value="old-key"),
-            patch.object(MANAGER, "store_credential_key", side_effect=writes.append),
-            patch.object(MANAGER, "install", return_value=self.install_result),
+            patch.dict(os.environ, {
+                "CUSTOM_AGENT_MODEL": "vendor-model",
+                "CUSTOM_AGENT_REASONING_EFFORT": "medium",
+                "CUSTOM_AGENT_VISION": "yes",
+            }),
+            patch.object(MANAGER, "install", return_value=self.install_result) as install,
         ):
-            result = MANAGER.setup(*self.base_args, api_key_env=True)
+            result = MANAGER.setup(
+                self.paths,
+                "unused-codex",
+                True,
+                None,
+                None,
+                None,
+                model_env=True,
+                effort_env=True,
+                vision_env=True,
+            )
 
         self.assertEqual(result["status"], "configured")
-        self.assertEqual(writes, ["replacement-key"])
+        install.assert_called_once_with(self.paths, "unused-codex", "vendor-model", "medium", True)
 
-    def test_failed_install_restores_replaced_key(self) -> None:
-        writes: list[str] = []
+    def test_old_manifest_defaults_to_high_and_text_only(self) -> None:
+        self.paths.state_dir.mkdir(parents=True)
+        self.paths.manifest.write_text(json.dumps({"selected_model": "vendor-model"}), encoding="utf-8")
         with (
-            patch.dict(os.environ, {"CUSTOM_AGENT_API_KEY": "replacement-key"}),
-            patch.object(MANAGER, "credential_available", return_value=True),
-            patch.object(MANAGER, "credential_has_key", return_value=True),
-            patch.object(MANAGER, "read_credential_key", return_value="old-key"),
-            patch.object(MANAGER, "store_credential_key", side_effect=writes.append),
-            patch.object(MANAGER, "install", side_effect=RuntimeError("install failed")),
+            patch.object(MANAGER, "install", return_value=self.install_result) as install,
         ):
-            with self.assertRaisesRegex(RuntimeError, "install failed"):
-                MANAGER.setup(*self.base_args, api_key_env=True)
+            MANAGER.setup(self.paths, "unused-codex", True, None, None, None)
 
-        self.assertEqual(writes, ["replacement-key", "old-key"])
+        install.assert_called_once_with(self.paths, "unused-codex", "vendor-model", "high", False)
 
-    def test_failed_first_install_removes_new_key(self) -> None:
-        writes: list[str] = []
-        removals: list[bool] = []
-        with (
-            patch.dict(os.environ, {"CUSTOM_AGENT_API_KEY": "first-key"}),
-            patch.object(MANAGER, "credential_available", return_value=True),
-            patch.object(MANAGER, "credential_has_key", return_value=False),
-            patch.object(MANAGER, "store_credential_key", side_effect=writes.append),
-            patch.object(MANAGER, "remove_credential_key", side_effect=lambda: removals.append(True)),
-            patch.object(MANAGER, "install", side_effect=RuntimeError("install failed")),
-        ):
-            with self.assertRaisesRegex(RuntimeError, "install failed"):
-                MANAGER.setup(*self.base_args, api_key_env=True)
-
-        self.assertEqual(writes, ["first-key"])
-        self.assertEqual(removals, [True])
-
-    def test_existing_key_is_preserved_without_explicit_input(self) -> None:
-        with (
-            patch.object(MANAGER, "credential_available", return_value=True),
-            patch.object(MANAGER, "credential_has_key", return_value=True),
-            patch.object(MANAGER, "read_credential_key", side_effect=AssertionError("unexpected read")),
-            patch.object(MANAGER, "store_credential_key", side_effect=AssertionError("unexpected write")),
-            patch.object(MANAGER, "install", return_value=self.install_result),
-        ):
-            result = MANAGER.setup(*self.base_args)
-
-        self.assertEqual(result["status"], "configured")
-
-    def test_explicit_empty_env_does_not_fall_back_to_existing_key(self) -> None:
-        with (
-            patch.dict(os.environ, {"CUSTOM_AGENT_API_KEY": ""}),
-            patch.object(MANAGER, "credential_available", return_value=True),
-            patch.object(MANAGER, "credential_has_key", return_value=True),
-            patch.object(MANAGER, "read_credential_key", side_effect=AssertionError("unexpected read")),
-            patch.object(MANAGER, "store_credential_key", side_effect=AssertionError("unexpected write")),
-        ):
+    def test_empty_vision_environment_is_rejected(self) -> None:
+        with patch.dict(os.environ, {"CUSTOM_AGENT_VISION": ""}):
             with self.assertRaises(MANAGER.ManagerError) as caught:
-                MANAGER.setup(*self.base_args, api_key_env=True)
+                MANAGER.setup(self.paths, "unused-codex", True, "vendor-model", "high", None, vision_env=True)
 
-        self.assertEqual(caught.exception.code, "credential_missing")
+        self.assertEqual(caught.exception.code, "configuration_missing")
+
+
+class ModelCatalogTests(unittest.TestCase):
+    def base(self) -> dict[str, object]:
+        return {"models": [{"slug": "parent", "display_name": "Parent", "input_modalities": ["text"]}]}
+
+    def test_vision_enabled_adds_image_modality(self) -> None:
+        model = MANAGER.model_for_endpoint(self.base(), "parent", "child", "medium", True)["child"]
+        self.assertEqual(model["input_modalities"], ["text", "image"])
+        self.assertTrue(model["supports_image_detail_original"])
+        self.assertEqual(model["default_reasoning_level"], "medium")
+
+    def test_vision_disabled_remains_text_only(self) -> None:
+        model = MANAGER.model_for_endpoint(self.base(), "parent", "child", "low", False)["child"]
+        self.assertEqual(model["input_modalities"], ["text"])
+        self.assertFalse(model["supports_image_detail_original"])
+
+    def test_agent_uses_parent_provider_and_selected_effort(self) -> None:
+        text = MANAGER.expected_agent_text("child", "parent-provider", "low", True)
+        self.assertIn('model_provider = "parent-provider"', text)
+        self.assertIn('model_reasoning_effort = "low"', text)
+        self.assertIn("inspect them directly", text)
+
+    def test_text_only_agent_does_not_claim_image_access(self) -> None:
+        text = MANAGER.expected_agent_text("child", "parent-provider", "high", False)
+        self.assertIn("configured for text-only input", text)
+
+
+class InstallIsolationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.paths = MANAGER.resolve_paths(self.temporary.name)
+        self.paths.home.mkdir(parents=True, exist_ok=True)
+
+    def test_install_inherits_parent_provider_and_preserves_parent_auth(self) -> None:
+        original = (
+            'model = "parent-model"\n'
+            'model_provider = "parent-provider"\n'
+            '[model_providers.parent-provider]\n'
+            'base_url = "https://gateway.example/v1"\n'
+            'wire_api = "responses"\n'
+            '[model_providers.parent-provider.auth]\n'
+            'env_key = "PARENT_KEY"\n'
+            f'{MANAGER.PROVIDER_BEGIN}\n'
+            '[model_providers.custom_agent]\n'
+            'base_url = "https://legacy.example/v1"\n'
+            f'{MANAGER.PROVIDER_END}\n'
+        )
+        self.paths.config.write_text(original, encoding="utf-8")
+        catalog = {"models": [{"slug": "parent-model", "display_name": "Parent"}]}
+
+        with patch.object(MANAGER, "load_base_catalog", return_value=catalog):
+            outcome = MANAGER.install(self.paths, "unused-codex", "child-model", "medium", True)
+
+        updated = self.paths.config.read_text(encoding="utf-8")
+        parsed = MANAGER.parse_toml_text(updated)
+        self.assertEqual(parsed["model_provider"], "parent-provider")
+        self.assertEqual(parsed["model_providers"]["parent-provider"]["auth"]["env_key"], "PARENT_KEY")
+        self.assertNotIn("custom_agent", parsed["model_providers"])
+        self.assertTrue(outcome["parent_credentials_untouched"])
+        self.assertTrue(outcome["legacy_provider_block_removed"])
+        agent = self.paths.agent.read_text(encoding="utf-8")
+        self.assertIn('model_provider = "parent-provider"', agent)
+        manifest = json.loads(self.paths.manifest.read_text(encoding="utf-8"))
+        self.assertEqual(manifest["reasoning_effort"], "medium")
+        self.assertTrue(manifest["supports_vision"])
 
 
 class StdioEncodingTests(unittest.TestCase):
@@ -169,31 +198,13 @@ class NativeRouteTests(unittest.TestCase):
             encoding="utf-8",
         )
 
-    def write_manifest(self, base_url: str) -> None:
-        self.paths.manifest.write_text(
-            json.dumps({"base_url": base_url}),
-            encoding="utf-8",
-        )
-
-    def test_shared_gateway_reports_parent_credential_source(self) -> None:
-        self.write_manifest("https://gateway.example/v1/")
-
+    def test_route_always_inherits_parent_provider(self) -> None:
         route = MANAGER.native_route_details(self.paths)
 
-        self.assertEqual(route["route_mode"], "inherited_shared_gateway")
+        self.assertEqual(route["route_mode"], "inherited_parent_provider")
         self.assertEqual(route["expected_provider"], "parent")
         self.assertEqual(route["credential_source"], "parent_provider")
         self.assertFalse(route["uses_dedicated_credential"])
-
-    def test_distinct_gateway_reports_dedicated_credential_source(self) -> None:
-        self.write_manifest("https://custom.example/v1/")
-
-        route = MANAGER.native_route_details(self.paths)
-
-        self.assertEqual(route["route_mode"], "dedicated_provider")
-        self.assertEqual(route["expected_provider"], MANAGER.PROVIDER)
-        self.assertEqual(route["credential_source"], "custom_agent_system_credential")
-        self.assertTrue(route["uses_dedicated_credential"])
 
     def test_native_event_parser_preserves_failed_child_state(self) -> None:
         output = "\n".join(

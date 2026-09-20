@@ -4,37 +4,37 @@
     {
       "id": 1,
       "prompt": "阅读这个项目仓库，帮我配置这个技能。",
-      "expected_output": "阅读 AGENTS.md 和 Skill 文档；只安装到全局 deepseek 目录且排除依赖缓存；运行 status；通过本机页面让用户填写 URL、Key、模型；经包装器 setup 并完成直连、原生和数据库验收。",
+      "expected_output": "只在全局 deepseek 目录或隔离临时目录操作；运行 status；通过本机页面让用户填写子代理模型、思考强度和识图能力；经包装器 setup 并完成父 Provider 直连、原生和数据库验收。",
       "files": [],
-      "name": "从仓库自动安装和配置"
+      "name": "从仓库安装和配置"
     },
     {
       "id": 2,
-      "prompt": "用我自己的 Responses 网关和任意模型配置原生子 Agent，密钥不要发到聊天。",
-      "expected_output": "使用同一本机安全页面收集 URL、API Key 和精确模型 ID，URL/模型为明文输入、Key 为密码输入且都不回填；使用用户给出的精确 Base URL，不自行追加 /v1 或其他路径，但保留用户给出的合法路径；再以三个 --*-env 参数经包装器运行 setup；不要求 Key 使用特定前缀，不回显或明文保存 Key。",
+      "prompt": "把子代理模型改成 deepseek-v4.1-flash，思考强度 high，支持识图。",
+      "expected_output": "本机页面只显示模型、low/medium/high 思考强度和 yes/no 识图能力；不请求或修改 API URL、API Key、父 Provider 或 auth.json；模型目录声明 text,image，Agent 使用父 Provider 和 high。",
       "files": [],
-      "name": "通用端点三字段安全配置"
+      "name": "三字段配置与父认证隔离"
     },
     {
       "id": 3,
-      "prompt": "把这个功能拆给子 Agent 编写并帮我验收，失败就继续让它修改。",
-      "expected_output": "主 Agent 拆出有验收标准的依赖计划点；CustomAgent 只返回完整候选补丁；主 Agent 在隔离副本应用和测试；失败时发送具体位置、命令证据、预期行为和方向给同一 Agent，循环直到通过，再写入真实工作区并复测。",
+      "prompt": "这个图片任务交给 DeepSeek 子 Agent 自己看，不要主代理先识图。",
+      "expected_output": "先确认 supports_vision 为 true；把图片作为 image 或 local_image 输入直接附加到 CustomAgent 委派；子 Agent 直接检查图片。若开关为 false，则明确不能这样派发。",
       "files": [],
-      "name": "只读候选补丁和闭环验收"
+      "name": "视觉输入直接委派"
     },
     {
       "id": 4,
       "prompt": "检查自定义子 Agent 为什么没有生效。",
-      "expected_output": "先运行 status，再按结构化结果运行 test 或 repair；验收 NATIVE_CUSTOM_AGENT_OK 和 threads 表中的实际 provider、精确模型、high 与 CustomAgent。",
+      "expected_output": "运行 status、test 或 repair；验收 NATIVE_CUSTOM_AGENT_OK 和 threads 表中的父 Provider、精确模型、所选思考强度与 CustomAgent，不根据 UI 标签或自述判断。",
       "files": [],
       "name": "严格原生路由诊断"
     },
     {
       "id": 5,
-      "prompt": "卸载这个子 Agent，但保留 API Key。",
-      "expected_output": "运行 uninstall 且不传 --remove-credential，只移除本 Skill 管理的配置。",
+      "prompt": "卸载这个子 Agent，不要动我的 Codex 登录和密钥。",
+      "expected_output": "运行 uninstall，只移除本 Skill 管理的角色和模型目录，明确父 Provider、auth.json 和所有认证均未修改或删除。",
       "files": [],
-      "name": "保留凭据卸载"
+      "name": "认证隔离卸载"
     }
   ]
 }

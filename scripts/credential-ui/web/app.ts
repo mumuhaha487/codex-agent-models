@@ -1,15 +1,19 @@
-type InputType = 'password' | 'url' | 'text';
-type Field = { id: string; label: string; credential: string; revision: string; configured: boolean; storage: string; ui?: { title?: string; placeholder?: string; saveLabel?: string; inputType?: InputType } };
+type InputType = 'password' | 'url' | 'text' | 'select';
+type Field = { id: string; label: string; credential: string; revision: string; configured: boolean; storage: string; ui?: { title?: string; placeholder?: string; saveLabel?: string; inputType?: InputType; options?: string[] } };
 type Metadata = { fields: Field[]; page: { title?: string; label?: string; saveLabel?: string }; outcome: string };
 type SaveResult = { status: string; results?: { credential: string; status: string }[] };
 const get = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 const form = get<HTMLFormElement>('credential-form');
 const button = get<HTMLButtonElement>('save');
-let inputs: HTMLInputElement[] = [];
+let inputs: Array<HTMLInputElement | HTMLSelectElement> = [];
 let meta: Metadata;
 let busy = false;
+const sharedFieldSaveLabel = () => {
+  const first = meta.fields[0]?.ui?.saveLabel;
+  return first && meta.fields.every(field => field.ui?.saveLabel === first) ? first : undefined;
+};
 const saveLabel = () => inputs.some((input, index) => input.value.trim() && meta.fields[index].configured)
-  ? '替换并保存' : (meta.page.saveLabel ?? (meta.fields.length === 1 ? meta.fields[0].ui?.saveLabel : undefined) ?? '保存');
+  ? '替换并保存' : (meta.page.saveLabel ?? sharedFieldSaveLabel() ?? '保存');
 async function request<T>(url: string, options: RequestInit = {}): Promise<T> {
   let response: Response;
   try {
@@ -48,12 +52,24 @@ function render() {
       const state = document.createElement('span'); state.className = 'field-state'; state.textContent = '已配置'; label.append(state);
     }
     const inputType = field.ui?.inputType ?? 'password';
-    const input = document.createElement('input'); input.id = label.htmlFor; input.type = inputType;
-    input.setAttribute('autocomplete', inputType === 'password' ? 'new-password' : inputType === 'url' ? 'url' : 'off');
-    input.autocapitalize = 'off'; input.spellcheck = false; input.maxLength = 2500;
+    const input = inputType === 'select' ? document.createElement('select') : document.createElement('input');
+    input.id = label.htmlFor;
+    if (inputType === 'select') {
+      const select = input as HTMLSelectElement;
+      const empty = document.createElement('option'); empty.value = '';
+      empty.textContent = field.configured ? '留空保留' : '请选择'; select.append(empty);
+      for (const value of field.ui?.options ?? []) {
+        const option = document.createElement('option'); option.value = value; option.textContent = value; select.append(option);
+      }
+    } else {
+      const textInput = input as HTMLInputElement;
+      textInput.type = inputType;
+      textInput.setAttribute('autocomplete', inputType === 'password' ? 'new-password' : inputType === 'url' ? 'url' : 'off');
+      textInput.autocapitalize = 'off'; textInput.spellcheck = false; textInput.maxLength = 2500;
+    }
     input.required = !field.configured; input.setAttribute('aria-describedby', 'hint message');
     const fallback = inputType === 'password' ? '粘贴 API Key' : inputType === 'url' ? '输入 API URL' : '输入配置值';
-    input.placeholder = field.configured ? '留空保留，输入则替换' : (field.ui?.placeholder ?? fallback);
+    if (inputType !== 'select') (input as HTMLInputElement).placeholder = field.configured ? '留空保留，输入则替换' : (field.ui?.placeholder ?? fallback);
     input.disabled = !['waiting', 'partial'].includes(meta.outcome);
     wrapper.append(label, input); container.append(wrapper); inputs.push(input);
   });

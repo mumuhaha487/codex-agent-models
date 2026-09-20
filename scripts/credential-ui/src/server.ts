@@ -167,7 +167,7 @@ async function main() {
   if (port > 65535) throw new PublicError('端口不合法。');
   if (pageFile && manifestFiles.length) throw new PublicError('--page 与 --manifest 不能同时使用。');
   const page = pageFile ? await loadPage(pageFile) : {
-    manifests: await Promise.all((manifestFiles.length ? manifestFiles : [path.join(root, 'manifests', 'default.json')]).map(loadManifest))
+    manifests: await Promise.all((manifestFiles.length ? manifestFiles : [path.join(root, 'manifests', 'model.json')]).map(loadManifest))
   };
   const app = await startServer({ ...page, port,
     onComplete: result => process.stdout.write(JSON.stringify(result) + '\n') });

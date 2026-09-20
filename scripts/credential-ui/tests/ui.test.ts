@@ -16,12 +16,13 @@ class Element {
   setAttribute(name: string, value: string) { if (name === 'autocomplete') this.autocomplete = value; }
   addEventListener(event: string, callback: (event: object) => unknown) { this.listeners[event] = callback; }
 }
-async function harness(configured = false, fail = false, inputTypes: Array<'password' | 'url' | 'text' | undefined> = [undefined, undefined],
+async function harness(configured = false, fail = false, inputTypes: Array<'password' | 'url' | 'text' | 'select' | undefined> = [undefined, undefined],
   page: { title?: string; label?: string; saveLabel?: string } = { title: '连接服务', label: '两个服务', saveLabel: '确认保存' }, fieldTitle?: string) {
   const nodes = Object.fromEntries(['credential-form', 'fields', 'save', 'heading', 'context', 'hint', 'message'].map(key => [key, new Element()]));
   const fields = inputTypes.map((inputType, index) => ({ id: 'sample', label: index ? '<img src=x>' : '语音服务', credential: 'sample/' + index,
     configured: index === 0 && configured, revision: 'revision-' + index, storage: '测试凭据库',
-    ui: { placeholder: '测试输入', ...(inputType ? { inputType } : {}), ...(fieldTitle ? { title: fieldTitle } : {}) } }));
+    ui: { placeholder: '测试输入', saveLabel: '更新', ...(inputType ? { inputType } : {}),
+      ...(inputType === 'select' ? { options: ['low', 'high'] } : {}), ...(fieldTitle ? { title: fieldTitle } : {}) } }));
   const metadata = { fields, page, outcome: 'waiting' };
   const submitted: any[] = [];
   const lifecycle: Record<string, () => void> = {};
@@ -60,6 +61,14 @@ test('真实前端产物：缺省为密码框，URL 和文本字段明文显示�
   assert.deepEqual(h.inputs().map(input => input.type), ['password', 'url', 'text']);
   assert.deepEqual(h.inputs().map(input => input.autocomplete), ['new-password', 'url', 'off']);
   assert.ok(h.inputs().every(input => input.value === ''));
+});
+test('真实前端产物：下拉字段渲染声明选项且不依赖 HTMLInputElement 全局', async () => {
+  const h = await harness(false, false, ['text', 'select', 'select'], {});
+  assert.equal(h.nodes.save.textContent, '更新');
+  assert.equal(h.inputs()[1].children[0].textContent, '请选择');
+  assert.deepEqual(h.inputs()[1].children.slice(1).map(option => option.value), ['low', 'high']);
+  h.inputs()[0].value = 'child-model'; h.inputs()[1].value = 'high'; h.inputs()[2].value = 'low'; h.input();
+  assert.equal(h.nodes.save.disabled, false);
 });
 test('真实前端产物：混合配置页使用共同字段标题与配置语义的 context', async () => {
   const h = await harness(false, false, ['url', 'password', 'text'], {}, '配置自定义 Codex 子 Agent');

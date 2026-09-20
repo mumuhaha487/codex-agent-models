@@ -4,7 +4,7 @@ import path from 'node:path';
 import { loadManifest, nativeBackend, PublicError } from './config.ts';
 
 type Binding = { file: string; variable: string };
-const defaultManifest = fileURLToPath(new URL('../manifests/default.json', import.meta.url));
+const defaultManifest = fileURLToPath(new URL('../manifests/model.json', import.meta.url));
 const reserved = new Set(['PATH', 'HOME', 'SHELL', 'NODE_OPTIONS', 'LD_PRELOAD', 'DYLD_INSERT_LIBRARIES', 'PYTHONPATH', 'PYTHONSTARTUP', 'COMSPEC', 'SYSTEMROOT']);
 export function parseBindings(args: string[]) {
   const split = args.indexOf('--');

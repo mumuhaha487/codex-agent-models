@@ -51,12 +51,12 @@ form.multi { grid-template-columns: 1fr; gap: 18px; }
 .multi button { justify-self: end; height: 36px; }
 body:has(form.multi) { align-items: safe center; }
 body:has(form.multi) main { margin-top: 0; }
-input, button {
+input, select, button {
   font: inherit;
   border-radius: 8px;
   height: 42px;
 }
-input {
+input, select {
   width: 100%;
   min-width: 0;
   background: #fff;
@@ -73,11 +73,12 @@ input::placeholder {
   font-size: 12px;
 }
 input:hover:not(:disabled) { border-color: #c5c5c5; }
-input:focus {
+select:hover:not(:disabled) { border-color: #c5c5c5; }
+input:focus, select:focus {
   border-color: #929292;
   box-shadow: 0 0 0 3px #eeeeee, 0 1px 2px #00000003;
 }
-input:disabled { background: #f4f4f4; }
+input:disabled, select:disabled { background: #f4f4f4; }
 button {
   min-width: 62px;
   padding: 0 15px;
@@ -135,8 +136,8 @@ button:focus-visible {
 
 @media (max-width: 480px) {
   main { margin-top: -8vh; }
-  input { font-size: 16px; }
-  input, button { height: 44px; }
+  input, select { font-size: 16px; }
+  input, select, button { height: 44px; }
 }
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; }

@@ -7,7 +7,6 @@ import argparse
 import copy
 import getpass
 import hashlib
-import ipaddress
 import json
 import os
 import re
@@ -18,7 +17,6 @@ import sys
 import tempfile
 import time
 import tomllib
-from urllib.parse import urlsplit, urlunsplit
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
@@ -52,10 +50,10 @@ except ImportError:  # macOS / Linux
 
 SKILL_NAME = "deepseek"
 LEGACY_RUNTIME_ID = "codex-custom-subagent"
-PROVIDER = "custom_agent"
-PROVIDER_DISPLAY_NAME = "deepseek"
 ROLE = "CustomAgent"
-EFFORT = "high"
+DEFAULT_EFFORT = "high"
+REASONING_EFFORTS = {"low", "medium", "high"}
+VISION_VALUES = {"yes", "no"}
 MODEL_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
 PARENT_MULTI_AGENT_VERSION = "v1"
 DESKTOP_MULTI_AGENT_V2 = False
@@ -221,10 +219,6 @@ def credential_backend() -> str | None:
     return None
 
 
-def credential_available() -> bool:
-    return credential_backend() is not None
-
-
 def _macos_read_credential() -> str | None:
     proc = subprocess.run(
         [
@@ -243,36 +237,6 @@ def _macos_read_credential() -> str | None:
     if proc.returncode != 0:
         return None
     return proc.stdout.rstrip("\r\n") or None
-
-
-def _macos_store_credential(secret: str) -> None:
-    proc = subprocess.run(
-        [
-            "/usr/bin/security",
-            "add-generic-password",
-            "-U",
-            "-a",
-            credential_account(),
-            "-s",
-            CREDENTIAL_TARGET,
-            "-w",
-            secret,
-        ],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-    if proc.returncode != 0:
-        raise ManagerError("credential_write_failed", "无法把 API Key 写入 macOS Keychain。")
-
-
-def _macos_remove_credential() -> bool:
-    proc = subprocess.run(
-        ["/usr/bin/security", "delete-generic-password", "-a", credential_account(), "-s", CREDENTIAL_TARGET],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    return proc.returncode == 0
 
 
 def _windows_credential_api():
@@ -303,10 +267,6 @@ def _windows_credential_api():
         ctypes.POINTER(ctypes.POINTER(CredentialW)),
     ]
     advapi32.CredReadW.restype = wintypes.BOOL
-    advapi32.CredWriteW.argtypes = [ctypes.POINTER(CredentialW), wintypes.DWORD]
-    advapi32.CredWriteW.restype = wintypes.BOOL
-    advapi32.CredDeleteW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD]
-    advapi32.CredDeleteW.restype = wintypes.BOOL
     advapi32.CredFree.argtypes = [ctypes.c_void_p]
     advapi32.CredFree.restype = None
     return ctypes, CredentialW, advapi32
@@ -333,39 +293,6 @@ def _windows_read_credential() -> str | None:
         advapi32.CredFree(credential)
 
 
-def _windows_store_credential(secret: str) -> None:
-    ctypes, credential_type, advapi32 = _windows_credential_api()
-    raw = secret.encode("utf-8")
-    blob = (ctypes.c_ubyte * len(raw)).from_buffer_copy(raw)
-    credential = credential_type()
-    credential.Flags = 0
-    credential.Type = 1
-    credential.TargetName = CREDENTIAL_TARGET
-    credential.CredentialBlobSize = len(raw)
-    credential.CredentialBlob = ctypes.cast(blob, ctypes.POINTER(ctypes.c_ubyte))
-    credential.Persist = 2
-    credential.UserName = credential_account()
-    if not advapi32.CredWriteW(ctypes.byref(credential), 0):
-        error = ctypes.get_last_error()
-        raise ManagerError(
-            "credential_write_failed",
-            f"无法把 API Key 写入 Windows Credential Manager（错误 {error}）。",
-        )
-
-
-def _windows_remove_credential() -> bool:
-    ctypes, _, advapi32 = _windows_credential_api()
-    if advapi32.CredDeleteW(CREDENTIAL_TARGET, 1, 0):
-        return True
-    error = ctypes.get_last_error()
-    if error == 1168:
-        return False
-    raise ManagerError(
-        "credential_delete_failed",
-        f"无法从 Windows Credential Manager 删除 API Key（错误 {error}）。",
-    )
-
-
 def read_credential_key() -> str | None:
     backend = credential_backend()
     if backend == "macos-keychain":
@@ -375,39 +302,8 @@ def read_credential_key() -> str | None:
     raise ManagerError("unsupported_platform", "当前只支持 macOS 和 Windows 系统凭据库。")
 
 
-def credential_has_key() -> bool:
-    if not credential_available():
-        return False
-    return read_credential_key() is not None
-
-
-def store_credential_key(secret: str) -> None:
-    if not secret or "\n" in secret or "\r" in secret or len(secret) > 2500:
-        raise ManagerError("invalid_api_key", "API Key 必须是长度不超过 2500 的非空单行值。")
-    backend = credential_backend()
-    if backend == "macos-keychain":
-        _macos_store_credential(secret)
-        return
-    if backend == "windows-credential-manager":
-        _windows_store_credential(secret)
-        return
-    raise ManagerError("unsupported_platform", "当前只支持 macOS 和 Windows 系统凭据库。")
-
-
-def remove_credential_key() -> bool:
-    if not credential_available() or not credential_has_key():
-        return False
-    if credential_backend() == "macos-keychain":
-        return _macos_remove_credential()
-    return _windows_remove_credential()
-
-
 def toml_string(value: str) -> str:
     return json.dumps(value, ensure_ascii=False)
-
-
-def toml_string_array(values: list[str]) -> str:
-    return "[" + ", ".join(toml_string(value) for value in values) + "]"
 
 
 def parse_toml_text(text: str) -> dict[str, Any]:
@@ -557,43 +453,28 @@ def removed_feature_flags(parsed: dict[str, Any]) -> list[str]:
     return [name for name in REMOVED_FEATURE_FLAGS if name in features]
 
 
-def expected_agent_text(model: str) -> str:
+def expected_agent_text(model: str, provider: str, effort: str, supports_vision: bool) -> str:
+    vision_instruction = (
+        "When image inputs are included in your task context, inspect them directly and use the visual evidence in your patch; do not ask the parent agent to pre-analyze them."
+        if supports_vision
+        else "You are configured for text-only input. Do not claim to inspect images; use visual observations supplied by the parent agent."
+    )
     return f'''name = {toml_string(ROLE)}
 description = "Read-only deepseek implementation subagent that returns complete candidate patches for parent-agent review."
 model = {toml_string(model)}
-model_provider = {toml_string(PROVIDER)}
-model_reasoning_effort = {toml_string(EFFORT)}
+model_provider = {toml_string(provider)}
+model_reasoning_effort = {toml_string(effort)}
 sandbox_mode = "read-only"
 developer_instructions = """
 You are the read-only deepseek implementation subagent running inside Codex.
 
 Work only on the single bounded plan item assigned by the parent agent. Inspect the repository and reason about the implementation, but do not write to the shared workspace.
+{vision_instruction}
 Return a complete unified diff or patch that the parent can apply, together with relevant test commands and explicit assumptions. The patch must be self-contained for the assigned plan item.
 When the parent reports an acceptance failure, use its exact file locations, commands, evidence, expected behavior, and direction to return a complete revised replacement patch, not a partial addendum.
 Do not spawn or delegate to any additional subagent.
 """
 '''
-
-
-def normalize_base_url(value: str) -> str:
-    candidate = value.strip()
-    parsed = urlsplit(candidate)
-    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-        raise ManagerError("invalid_base_url", "Base URL 必须是完整的 http 或 https 地址。")
-    if parsed.username or parsed.password or parsed.query or parsed.fragment:
-        raise ManagerError("invalid_base_url", "Base URL 不能包含凭据、查询参数或片段。")
-    if parsed.scheme == "http":
-        try:
-            address = ipaddress.ip_address(parsed.hostname)
-        except ValueError:
-            address = None
-        if parsed.hostname != "localhost" and not (address and (address.is_private or address.is_loopback)):
-            raise ManagerError(
-                "insecure_base_url",
-                "HTTP 仅允许 localhost、回环地址或私有网络 IP；公网服务必须使用 HTTPS。",
-            )
-    path = parsed.path.rstrip("/") + "/"
-    return urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))
 
 
 def validate_model_id(model: str) -> str:
@@ -602,22 +483,17 @@ def validate_model_id(model: str) -> str:
     return model
 
 
-def managed_provider_block(base_url: str) -> str:
-    auth = expected_provider_auth()
-    return f'''
-{PROVIDER_BEGIN}
-[model_providers.{PROVIDER}]
-name = {toml_string(PROVIDER_DISPLAY_NAME)}
-base_url = {toml_string(base_url)}
-wire_api = "responses"
+def validate_reasoning_effort(effort: str) -> str:
+    if effort not in REASONING_EFFORTS:
+        raise ManagerError("invalid_reasoning_effort", "思考强度必须是 low、medium 或 high。")
+    return effort
 
-[model_providers.{PROVIDER}.auth]
-command = {toml_string(auth["command"])}
-args = {toml_string_array(auth["args"])}
-timeout_ms = 5000
-refresh_interval_ms = 0
-{PROVIDER_END}
-'''
+
+def validate_vision(value: str) -> bool:
+    normalized = value.strip().lower()
+    if normalized not in VISION_VALUES:
+        raise ManagerError("invalid_vision", "识图能力必须是 yes 或 no。")
+    return normalized == "yes"
 
 
 def managed_role_block(paths: Paths) -> str:
@@ -630,55 +506,8 @@ config_file = {toml_string(str(paths.agent))}
 '''
 
 
-def expected_provider_auth() -> dict[str, Any]:
-    if credential_backend() == "windows-credential-manager":
-        return {
-            "command": sys.executable,
-            "args": [str(Path(__file__).resolve()), "_credential-get"],
-            "timeout_ms": 5000,
-            "refresh_interval_ms": 0,
-        }
-    return {
-        "command": "/usr/bin/security",
-        "args": [
-            "find-generic-password",
-            "-a",
-            credential_account(),
-            "-s",
-            CREDENTIAL_TARGET,
-            "-w",
-        ],
-        "timeout_ms": 5000,
-        "refresh_interval_ms": 0,
-    }
-
-
-def provider_conflicts(provider: dict[str, Any] | None, base_url: str) -> list[str]:
-    if not provider:
-        return []
+def compatible_existing(parsed: dict[str, Any], paths: Paths) -> tuple[bool, list[str]]:
     issues: list[str] = []
-    expected = {
-        "name": PROVIDER_DISPLAY_NAME,
-        "base_url": base_url,
-        "wire_api": "responses",
-    }
-    for key, value in expected.items():
-        if provider.get(key) != value:
-            issues.append(f"model_providers.{PROVIDER}.{key}")
-    auth = provider.get("auth")
-    if not isinstance(auth, dict):
-        issues.append(f"model_providers.{PROVIDER}.auth")
-        return issues
-    for key, value in expected_provider_auth().items():
-        if auth.get(key) != value:
-            issues.append(f"model_providers.{PROVIDER}.auth.{key}")
-    return issues
-
-
-def compatible_existing(parsed: dict[str, Any], paths: Paths, base_url: str) -> tuple[bool, list[str]]:
-    issues: list[str] = []
-    provider = (parsed.get("model_providers") or {}).get(PROVIDER)
-    issues.extend(provider_conflicts(provider, base_url))
     agent = (parsed.get("agents") or {}).get(ROLE)
     if agent:
         if set(agent) - {"description", "config_file"}:
@@ -692,6 +521,8 @@ def model_for_endpoint(
     base: dict[str, Any],
     parent_model: str,
     selected_model: str,
+    effort: str,
+    supports_vision: bool,
 ) -> dict[str, dict[str, Any]]:
     parent_entry = next(
         (item for item in base.get("models", []) if item.get("slug") == parent_model),
@@ -704,10 +535,14 @@ def model_for_endpoint(
         {
             "slug": selected_model,
             "display_name": selected_model,
-            "description": "Text-only custom agentic model served by a user-configured Responses endpoint.",
-            "input_modalities": ["text"],
-            "supports_image_detail_original": False,
-            "default_reasoning_level": EFFORT,
+            "description": (
+                "Custom agentic model with text and image input inherited from the parent provider."
+                if supports_vision
+                else "Text-only custom agentic model inherited from the parent provider."
+            ),
+            "input_modalities": ["text", "image"] if supports_vision else ["text"],
+            "supports_image_detail_original": supports_vision,
+            "default_reasoning_level": effort,
             "multi_agent_version": PARENT_MULTI_AGENT_VERSION,
         }
     )
@@ -725,30 +560,40 @@ def configured_custom_model(paths: Paths) -> str | None:
     return None
 
 
-def configured_base_url(paths: Paths) -> str | None:
-    manifest = read_manifest(paths)
-    value = manifest.get("base_url")
+def configured_reasoning_effort(paths: Paths) -> str:
+    value = read_manifest(paths).get("reasoning_effort", DEFAULT_EFFORT)
     if not isinstance(value, str):
-        return None
+        return DEFAULT_EFFORT
     try:
-        return normalize_base_url(value)
+        return validate_reasoning_effort(value)
     except ManagerError:
-        return None
+        return DEFAULT_EFFORT
 
 
-def resolve_base_url(paths: Paths, requested: str | None) -> str:
-    if requested is not None:
-        return normalize_base_url(requested)
-    configured = configured_base_url(paths)
-    if configured is None:
-        raise ManagerError("base_url_required", "尚未配置 Responses API URL。")
-    return configured
+def configured_supports_vision(paths: Paths) -> bool:
+    value = read_manifest(paths).get("supports_vision", False)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        try:
+            return validate_vision(value)
+        except ManagerError:
+            pass
+    return False
 
 
 def resolve_selected_model(paths: Paths, requested: str | None) -> str | None:
     if requested is not None:
         return validate_model_id(requested)
     return configured_custom_model(paths)
+
+
+def resolve_reasoning_effort(paths: Paths, requested: str | None) -> str:
+    return validate_reasoning_effort(requested) if requested is not None else configured_reasoning_effort(paths)
+
+
+def resolve_supports_vision(paths: Paths, requested: str | None) -> bool:
+    return validate_vision(requested) if requested is not None else configured_supports_vision(paths)
 
 
 def run_codex_models(codex_bin: str, paths: Paths) -> dict[str, Any]:
@@ -815,6 +660,11 @@ def configured_parent_model(config: dict[str, Any]) -> str | None:
     return None
 
 
+def configured_parent_provider(config: dict[str, Any]) -> str | None:
+    provider = config.get("model_provider")
+    return provider if isinstance(provider, str) and provider else None
+
+
 def make_backup(paths: Paths) -> Path:
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
     backup = paths.state_dir / "backups" / stamp
@@ -839,7 +689,13 @@ def read_manifest(paths: Paths) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
-def install(paths: Paths, codex_bin: str, selected_model: str, base_url: str) -> dict[str, Any]:
+def install(
+    paths: Paths,
+    codex_bin: str,
+    selected_model: str,
+    effort: str,
+    supports_vision: bool,
+) -> dict[str, Any]:
     paths.home.mkdir(parents=True, exist_ok=True)
     config_text = paths.config.read_text(encoding="utf-8") if paths.config.is_file() else ""
     parsed = parse_toml_text(config_text) if config_text.strip() else {}
@@ -849,10 +705,13 @@ def install(paths: Paths, codex_bin: str, selected_model: str, base_url: str) ->
     role_marker_present = ROLE_BEGIN in config_text and ROLE_END in config_text
     unmanaged_config = remove_managed_blocks(config_text)
     unmanaged_parsed = parse_toml_text(unmanaged_config) if unmanaged_config.strip() else {}
-    compatible, conflicts = compatible_existing(unmanaged_parsed, paths, base_url)
+    compatible, conflicts = compatible_existing(unmanaged_parsed, paths)
     if not compatible:
         raise ManagerError("conflict", "发现不兼容的现有自定义子 Agent 配置。", {"fields": conflicts})
-    target_agent_text = expected_agent_text(selected_model)
+    parent_provider = configured_parent_provider(unmanaged_parsed)
+    if not parent_provider:
+        raise ManagerError("parent_provider_unconfigured", "桌面配置中没有明确的父 model_provider。")
+    target_agent_text = expected_agent_text(selected_model, parent_provider, effort, supports_vision)
     if paths.agent.is_file() and paths.agent.read_text(encoding="utf-8") != target_agent_text:
         managed_agent_unchanged = bool(previous_manifest.get("managed_agent_file")) and (
             sha256_text_file(paths.agent) == previous_manifest.get("agent_sha256")
@@ -906,7 +765,7 @@ def install(paths: Paths, codex_bin: str, selected_model: str, base_url: str) ->
         parent_model = configured_parent_model(parsed)
         if not parent_model:
             raise ManagerError("parent_model_unconfigured", "桌面配置中没有明确的父模型。")
-        custom_models = model_for_endpoint(base, parent_model, selected_model)
+        custom_models = model_for_endpoint(base, parent_model, selected_model, effort, supports_vision)
         previous_parent = previous_manifest.get("parent_model")
         if previous_parent and previous_parent != parent_model:
             previous_entry = next(
@@ -938,9 +797,6 @@ def install(paths: Paths, codex_bin: str, selected_model: str, base_url: str) ->
         new_config = unmanaged_config
         for flag in removed_flags:
             new_config = remove_table_key(new_config, "features", flag)
-        provider_exists = bool((unmanaged_parsed.get("model_providers") or {}).get(PROVIDER))
-        if not provider_exists:
-            new_config = new_config.rstrip() + "\n" + managed_provider_block(base_url)
         if not registered_role_present:
             new_config = new_config.rstrip() + "\n" + managed_role_block(paths)
         new_config = set_top_level_key(new_config, "model_catalog_json", str(paths.catalog))
@@ -964,14 +820,15 @@ def install(paths: Paths, codex_bin: str, selected_model: str, base_url: str) ->
             candidate = backup / paths.catalog.name
             if candidate.is_file():
                 catalog_original_backup = str(candidate)
-        adopted_existing = provider_exists or agent_preexisted or catalog_preexisted
+        adopted_existing = registered_role_present or agent_preexisted or catalog_preexisted
         manifest = {
-            "schema_version": 7,
+            "schema_version": 8,
             "installed_at": datetime.now().isoformat(timespec="seconds"),
             "backup": str(backup),
             "previous_model_catalog_json": previous_catalog_value,
             "managed_catalog_selection": managed_catalog_selection,
-            "managed_provider_block": provider_marker_present or not provider_exists,
+            "managed_provider_block": False,
+            "legacy_provider_block_removed": provider_marker_present,
             "managed_agent_file": managed_agent_file,
             "catalog_preexisted": catalog_preexisted,
             "catalog_original_backup": catalog_original_backup,
@@ -979,6 +836,7 @@ def install(paths: Paths, codex_bin: str, selected_model: str, base_url: str) ->
             "managed_role_block": role_marker_present or not registered_role_present,
             "adopted_existing": adopted_existing,
             "parent_model": parent_model,
+            "parent_provider": parent_provider,
             "parent_multi_agent_version": PARENT_MULTI_AGENT_VERSION,
             "parent_original_multi_agent_version": parent_original_version,
             "managed_multi_agent_v2": managed_multi_agent_v2,
@@ -986,7 +844,8 @@ def install(paths: Paths, codex_bin: str, selected_model: str, base_url: str) ->
             "desktop_multi_agent_v2": DESKTOP_MULTI_AGENT_V2,
             "removed_feature_flags": removed_flags,
             "selected_model": selected_model,
-            "base_url": base_url,
+            "reasoning_effort": effort,
+            "supports_vision": supports_vision,
             "managed_models": list(custom_models),
             "config_sha256": sha256_bytes(new_config.encode()),
             "catalog_sha256": sha256_bytes(catalog_bytes),
@@ -999,7 +858,10 @@ def install(paths: Paths, codex_bin: str, selected_model: str, base_url: str) ->
             "backup": str(backup),
             "adopted_existing": adopted_existing,
             "selected_model": selected_model,
-            "base_url": base_url,
+            "reasoning_effort": effort,
+            "supports_vision": supports_vision,
+            "parent_credentials_untouched": True,
+            "legacy_provider_block_removed": provider_marker_present,
             "removed_feature_flags": removed_flags,
             **route,
         }
@@ -1010,20 +872,20 @@ def install(paths: Paths, codex_bin: str, selected_model: str, base_url: str) ->
 
 def static_status(paths: Paths, codex_bin: str | None = None) -> dict[str, Any]:
     selected_model = configured_custom_model(paths)
-    base_url = configured_base_url(paths)
+    effort = configured_reasoning_effort(paths)
+    supports_vision = configured_supports_vision(paths)
     manifest = read_manifest(paths)
     managed_models = manifest.get("managed_models") or []
     checks: dict[str, Any] = {
         "config_exists": paths.config.is_file(),
         "catalog_exists": paths.catalog.is_file(),
         "agent_exists": paths.agent.is_file(),
-        "credential_backend": credential_backend(),
-        "credential_present": credential_has_key(),
         "manifest_exists": paths.manifest.is_file(),
         "selected_model": selected_model,
-        "base_url": base_url,
-        "custom_endpoint": bool(base_url),
+        "reasoning_effort": effort,
+        "supports_vision": supports_vision,
         "model_selected": bool(selected_model),
+        "parent_credentials_untouched": True,
     }
     errors: list[str] = []
     parsed: dict[str, Any] = {}
@@ -1037,16 +899,12 @@ def static_status(paths: Paths, codex_bin: str | None = None) -> dict[str, Any]:
     legacy_flags = removed_feature_flags(parsed)
     checks["unrecognized_feature_flags"] = legacy_flags
     checks["unrecognized_feature_flags_absent"] = not legacy_flags
-    provider = (parsed.get("model_providers") or {}).get(PROVIDER)
     role = (parsed.get("agents") or {}).get(ROLE)
-    checks["provider_registered"] = bool(provider)
-    checks["provider_valid"] = bool(provider) and isinstance(base_url, str) and not provider_conflicts(provider, base_url)
     checks["agent_discovery"] = "user_config_registration"
     checks["role_registration_present"] = bool(role)
     checks["role_registration_valid"] = (
         bool(role)
-        and isinstance(base_url, str)
-        and not compatible_existing(parsed, paths, base_url)[1]
+        and not compatible_existing(parsed, paths)[1]
     )
     checks["catalog_selected"] = Path(parsed.get("model_catalog_json", "")).expanduser() == paths.catalog
     checks["desktop_multi_agent_v2"] = (parsed.get("features") or {}).get("multi_agent_v2")
@@ -1054,8 +912,11 @@ def static_status(paths: Paths, codex_bin: str | None = None) -> dict[str, Any]:
         checks["desktop_multi_agent_v2"] is DESKTOP_MULTI_AGENT_V2
     )
     parent_model = configured_parent_model(parsed)
+    parent_provider = configured_parent_provider(parsed)
     checks["parent_model"] = parent_model
     checks["parent_model_configured"] = bool(parent_model)
+    checks["parent_provider"] = parent_provider
+    checks["parent_provider_configured"] = bool(parent_provider)
     route = native_route_details(paths, parsed)
     checks["native_route_mode"] = route["route_mode"]
     checks["native_expected_provider"] = route["expected_provider"]
@@ -1070,6 +931,17 @@ def static_status(paths: Paths, codex_bin: str | None = None) -> dict[str, Any]:
                 model in registered for model in managed_models
             )
             checks["model_registered"] = selected_model in registered
+            custom_entry = next(
+                (item for item in data.get("models", []) if selected_model and item.get("slug") == selected_model),
+                None,
+            )
+            expected_modalities = ["text", "image"] if supports_vision else ["text"]
+            checks["model_modalities_valid"] = bool(custom_entry) and (
+                custom_entry.get("input_modalities") == expected_modalities
+            )
+            checks["model_reasoning_default_valid"] = bool(custom_entry) and (
+                custom_entry.get("default_reasoning_level") == effort
+            )
             parent_entry = next(
                 (item for item in data.get("models", []) if parent_model and item.get("slug") == parent_model),
                 None,
@@ -1082,14 +954,23 @@ def static_status(paths: Paths, codex_bin: str | None = None) -> dict[str, Any]:
             )
         except (OSError, json.JSONDecodeError):
             checks["model_registered"] = False
+            checks["model_modalities_valid"] = False
+            checks["model_reasoning_default_valid"] = False
             checks["parent_uses_plaintext_v1"] = False
             errors.append("模型目录无法解析。")
     else:
         checks["supported_models_registered"] = False
         checks["model_registered"] = False
+        checks["model_modalities_valid"] = False
+        checks["model_reasoning_default_valid"] = False
         checks["parent_uses_plaintext_v1"] = False
-    checks["agent_content_valid"] = bool(selected_model) and paths.agent.is_file() and (
-        paths.agent.read_text(encoding="utf-8") == expected_agent_text(selected_model)
+    checks["agent_content_valid"] = bool(selected_model and parent_provider) and paths.agent.is_file() and (
+        paths.agent.read_text(encoding="utf-8") == expected_agent_text(
+            selected_model,
+            parent_provider,
+            effort,
+            supports_vision,
+        )
     )
 
     version: tuple[int, int, int] | None = None
@@ -1104,16 +985,17 @@ def static_status(paths: Paths, codex_bin: str | None = None) -> dict[str, Any]:
             errors.append(str(exc))
     required = (
         "config_valid",
-        "provider_valid",
         "catalog_selected",
         "model_selected",
         "supported_models_registered",
         "model_registered",
+        "model_modalities_valid",
+        "model_reasoning_default_valid",
         "parent_model_configured",
+        "parent_provider_configured",
         "parent_uses_plaintext_v1",
         "desktop_multi_agent_v2_disabled",
         "agent_content_valid",
-        "credential_present",
         "manifest_exists",
         "role_registration_valid",
         "desktop_codex_detected",
@@ -1124,14 +1006,20 @@ def static_status(paths: Paths, codex_bin: str | None = None) -> dict[str, Any]:
         "configured" if ready else "partial",
         skill_name=SKILL_NAME,
         selected_model=selected_model,
-        base_url=base_url,
+        reasoning_effort=effort,
+        supports_vision=supports_vision,
+        parent_credentials_untouched=True,
         **route,
         checks=checks,
         errors=errors,
     )
 
 
-def direct_test(paths: Paths, codex_bin: str, selected_model: str) -> dict[str, Any]:
+def direct_test(paths: Paths, codex_bin: str, selected_model: str, effort: str) -> dict[str, Any]:
+    parsed = parse_toml_text(paths.config.read_text(encoding="utf-8"))
+    parent_provider = configured_parent_provider(parsed)
+    if not parent_provider:
+        raise ManagerError("parent_provider_unconfigured", "桌面配置中没有明确的父 model_provider。")
     env = dict(os.environ)
     env["CODEX_HOME"] = str(paths.home)
     prompt = "Reply exactly CUSTOM_AGENT_DIRECT_OK and nothing else."
@@ -1149,9 +1037,9 @@ def direct_test(paths: Paths, codex_bin: str, selected_model: str) -> dict[str, 
             "-m",
             selected_model,
             "-c",
-            f'model_provider="{PROVIDER}"',
+            f"model_provider={toml_string(parent_provider)}",
             "-c",
-            'model_reasoning_effort="high"',
+            f"model_reasoning_effort={toml_string(effort)}",
             prompt,
         ],
         capture_output=True,
@@ -1167,7 +1055,13 @@ def direct_test(paths: Paths, codex_bin: str, selected_model: str) -> dict[str, 
             "自定义子 Agent 直连测试失败。",
             {"stderr": proc.stderr[-1000:]},
         )
-    return {"direct": True, "selected_model": selected_model}
+    return {
+        "direct": True,
+        "selected_model": selected_model,
+        "model_provider": parent_provider,
+        "reasoning_effort": effort,
+        "credential_source": "parent_provider",
+    }
 
 
 def choose_parent_model(paths: Paths) -> str:
@@ -1240,28 +1134,13 @@ def wait_for_child_metadata(
 def native_route_details(paths: Paths, parsed: dict[str, Any] | None = None) -> dict[str, Any]:
     if parsed is None:
         parsed = parse_toml_text(paths.config.read_text(encoding="utf-8"))
-    parent_provider = parsed.get("model_provider")
-    provider = (parsed.get("model_providers") or {}).get(parent_provider)
-    parent_base_url = provider.get("base_url") if isinstance(provider, dict) else None
-    if isinstance(parent_provider, str) and isinstance(parent_base_url, str):
-        try:
-            configured = configured_base_url(paths)
-            if configured and normalize_base_url(parent_base_url) == configured:
-                return {
-                    "route_mode": "inherited_shared_gateway",
-                    "expected_provider": parent_provider,
-                    "parent_provider": parent_provider,
-                    "credential_source": "parent_provider",
-                    "uses_dedicated_credential": False,
-                }
-        except ManagerError:
-            pass
+    parent_provider = configured_parent_provider(parsed)
     return {
-        "route_mode": "dedicated_provider",
-        "expected_provider": PROVIDER,
-        "parent_provider": parent_provider if isinstance(parent_provider, str) else None,
-        "credential_source": "custom_agent_system_credential",
-        "uses_dedicated_credential": True,
+        "route_mode": "inherited_parent_provider",
+        "expected_provider": parent_provider,
+        "parent_provider": parent_provider,
+        "credential_source": "parent_provider",
+        "uses_dedicated_credential": False,
     }
 
 
@@ -1294,7 +1173,7 @@ def parse_native_events(stdout: str) -> tuple[list[str], dict[str, dict[str, Any
     return child_ids, child_states
 
 
-def native_test(paths: Paths, codex_bin: str, selected_model: str) -> dict[str, Any]:
+def native_test(paths: Paths, codex_bin: str, selected_model: str, effort: str) -> dict[str, Any]:
     parent_model = choose_parent_model(paths)
     route = native_route_details(paths)
     env = dict(os.environ)
@@ -1340,7 +1219,7 @@ def native_test(paths: Paths, codex_bin: str, selected_model: str) -> dict[str, 
     expected = {
         "model_provider": route["expected_provider"],
         "model": selected_model,
-        "reasoning_effort": EFFORT,
+        "reasoning_effort": effort,
         "agent_role": ROLE,
     }
     if child_state and child_state.get("status") not in {None, "completed"}:
@@ -1371,7 +1250,7 @@ def native_test(paths: Paths, codex_bin: str, selected_model: str) -> dict[str, 
     return {
         "desktop_fresh_session_native": True,
         "child_id": child_id,
-        "configured_provider": PROVIDER,
+        "configured_provider": route["expected_provider"],
         **route,
         **expected,
     }
@@ -1379,6 +1258,8 @@ def native_test(paths: Paths, codex_bin: str, selected_model: str) -> dict[str, 
 
 def run_tests(paths: Paths, codex_bin: str) -> dict[str, Any]:
     selected_model = configured_custom_model(paths)
+    effort = configured_reasoning_effort(paths)
+    supports_vision = configured_supports_vision(paths)
     if not selected_model:
         raise ManagerError(
             "model_selection_required",
@@ -1387,9 +1268,17 @@ def run_tests(paths: Paths, codex_bin: str) -> dict[str, Any]:
     status = static_status(paths, codex_bin)
     if status["status"] != "configured":
         raise ManagerError("not_configured", "静态配置尚未完整，不能运行实时测试。", status)
-    direct = direct_test(paths, codex_bin, selected_model)
-    native = native_test(paths, codex_bin, selected_model)
-    return result("ready", **direct, **native, new_task_required=True, restart_required=True)
+    direct = direct_test(paths, codex_bin, selected_model, effort)
+    native = native_test(paths, codex_bin, selected_model, effort)
+    evidence = {**direct, **native}
+    return result(
+        "ready",
+        **evidence,
+        supports_vision=supports_vision,
+        parent_credentials_untouched=True,
+        new_task_required=True,
+        restart_required=True,
+    )
 
 
 def restore_backup(paths: Paths, backup: Path) -> None:
@@ -1404,58 +1293,38 @@ def restore_backup(paths: Paths, backup: Path) -> None:
 def setup(
     paths: Paths,
     codex_bin: str,
-    api_key_stdin: bool,
     skip_live_test: bool,
     requested_model: str | None,
-    requested_base_url: str | None,
-    api_key_env: bool = False,
-    base_url_env: bool = False,
+    requested_effort: str | None,
+    requested_vision: str | None,
     model_env: bool = False,
+    effort_env: bool = False,
+    vision_env: bool = False,
 ) -> dict[str, Any]:
-    if base_url_env:
-        requested_base_url = os.environ.get("CUSTOM_AGENT_BASE_URL", "").strip()
-        if not requested_base_url:
-            raise ManagerError("credential_missing", "安全包装器没有注入 API URL。")
     if model_env:
         requested_model = os.environ.get("CUSTOM_AGENT_MODEL", "").strip()
         if not requested_model:
-            raise ManagerError("credential_missing", "安全包装器没有注入模型 ID。")
-    base_url = resolve_base_url(paths, requested_base_url)
+            raise ManagerError("configuration_missing", "设置页面没有注入模型 ID。")
+    if effort_env:
+        requested_effort = os.environ.get("CUSTOM_AGENT_REASONING_EFFORT", "").strip()
+        if not requested_effort:
+            raise ManagerError("configuration_missing", "设置页面没有注入思考强度。")
+    if vision_env:
+        requested_vision = os.environ.get("CUSTOM_AGENT_VISION", "").strip()
+        if not requested_vision:
+            raise ManagerError("configuration_missing", "设置页面没有注入识图能力。")
     selected_model = resolve_selected_model(paths, requested_model)
     if not selected_model:
         return result(
             "model_selection_required",
             message="请填写要配置的精确模型 ID。",
         )
-    if not credential_available():
-        raise ManagerError("unsupported", "当前只支持 macOS 和 Windows 系统凭据库。")
-    credential_preexisted = credential_has_key()
-    previous_secret: str | None = None
-    credential_changed = False
-    secret: str | None = None
-    if api_key_env:
-        secret = os.environ.get("CUSTOM_AGENT_API_KEY", "")
-    elif api_key_stdin:
-        secret = sys.stdin.readline().rstrip("\r\n")
-    elif not credential_preexisted:
-        if sys.stdin.isatty():
-            secret = getpass.getpass("自定义 Agent API Key（隐藏输入）：")
-        else:
-            return result("credential_missing", credential="custom_agent_api_key")
-
-    if secret is not None:
-        if not secret:
-            raise ManagerError("credential_missing", "显式输入中没有 API Key。")
-        if credential_preexisted:
-            previous_secret = read_credential_key()
-            credential_preexisted = previous_secret is not None
-        store_credential_key(secret)
-        secret = ""
-        credential_changed = True
+    effort = resolve_reasoning_effort(paths, requested_effort)
+    supports_vision = resolve_supports_vision(paths, requested_vision)
 
     install_result: dict[str, Any] | None = None
     try:
-        install_result = install(paths, codex_bin, selected_model, base_url)
+        install_result = install(paths, codex_bin, selected_model, effort, supports_vision)
         if skip_live_test:
             return result(
                 "configured",
@@ -1472,15 +1341,6 @@ def setup(
                 restore_backup(paths, Path(install_result["backup"]))
             except Exception as exc:
                 rollback_failures.append(f"files:{type(exc).__name__}")
-        if credential_changed:
-            try:
-                if credential_preexisted and previous_secret is not None:
-                    store_credential_key(previous_secret)
-                else:
-                    remove_credential_key()
-            except Exception as exc:
-                rollback_failures.append(f"credential:{type(exc).__name__}")
-        previous_secret = None
         if rollback_failures:
             raise ManagerError(
                 "rollback_failed",
@@ -1527,11 +1387,11 @@ def disable(paths: Paths) -> dict[str, Any]:
         "disabled",
         changed=changed,
         agent_preserved=not bool(manifest.get("managed_agent_file")),
-        credential_preserved=credential_has_key(),
+        parent_credentials_untouched=True,
     )
 
 
-def uninstall(paths: Paths, remove_credential: bool) -> dict[str, Any]:
+def uninstall(paths: Paths) -> dict[str, Any]:
     manifest = read_manifest(paths)
     if not manifest:
         raise ManagerError("not_managed", "没有找到本 Skill 的管理记录，拒绝修改现有配置。")
@@ -1570,13 +1430,13 @@ def uninstall(paths: Paths, remove_credential: bool) -> dict[str, Any]:
     except Exception:
         restore_backup(paths, backup)
         raise
-    removed_credential = remove_credential_key() if remove_credential else False
     return result(
         "uninstalled",
         disabled=disabled,
         catalog_removed=catalog_removed,
         catalog_restored=catalog_restored,
-        credential_removed=removed_credential,
+        parent_credentials_untouched=True,
+        legacy_credential_preserved=True,
     )
 
 
@@ -1637,7 +1497,7 @@ def main() -> int:
         try:
             secret = read_credential_key()
             if not secret:
-                print("自定义 Agent API Key 不存在。", file=sys.stderr)
+                print("旧版子代理凭据不存在。", file=sys.stderr)
                 return 2
             sys.stdout.write(secret)
             return 0
@@ -1648,17 +1508,16 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=("status", "setup", "test", "repair", "disable", "uninstall"))
     parser.add_argument("--codex-home")
-    credential_input = parser.add_mutually_exclusive_group()
-    credential_input.add_argument("--api-key-stdin", action="store_true")
-    credential_input.add_argument("--api-key-env", action="store_true", help="仅从可信包装器注入的 CUSTOM_AGENT_API_KEY 配置运行时凭据")
     model_input = parser.add_mutually_exclusive_group()
     model_input.add_argument("--model")
     model_input.add_argument("--model-env", action="store_true", help="仅从可信包装器注入的 CUSTOM_AGENT_MODEL 读取模型 ID")
-    base_url_input = parser.add_mutually_exclusive_group()
-    base_url_input.add_argument("--base-url")
-    base_url_input.add_argument("--base-url-env", action="store_true", help="仅从可信包装器注入的 CUSTOM_AGENT_BASE_URL 读取 API URL")
+    effort_input = parser.add_mutually_exclusive_group()
+    effort_input.add_argument("--effort", choices=sorted(REASONING_EFFORTS))
+    effort_input.add_argument("--effort-env", action="store_true", help="仅从可信包装器注入的 CUSTOM_AGENT_REASONING_EFFORT 读取思考强度")
+    vision_input = parser.add_mutually_exclusive_group()
+    vision_input.add_argument("--vision", choices=sorted(VISION_VALUES))
+    vision_input.add_argument("--vision-env", action="store_true", help="仅从可信包装器注入的 CUSTOM_AGENT_VISION 读取识图能力")
     parser.add_argument("--skip-live-test", action="store_true")
-    parser.add_argument("--remove-credential", action="store_true")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
     paths = resolve_paths(args.codex_home)
@@ -1672,24 +1531,24 @@ def main() -> int:
                     payload = setup(
                         paths,
                         codex_bin or "",
-                        args.api_key_stdin,
                         args.skip_live_test,
                         args.model,
-                        args.base_url,
-                        api_key_env=args.api_key_env,
-                        base_url_env=args.base_url_env,
+                        args.effort,
+                        args.vision,
                         model_env=args.model_env,
+                        effort_env=args.effort_env,
+                        vision_env=args.vision_env,
                     )
                 elif args.command == "test":
                     payload = run_tests(paths, codex_bin or "")
                 elif args.command == "disable":
                     payload = disable(paths)
                 else:
-                    payload = uninstall(paths, args.remove_credential)
+                    payload = uninstall(paths)
         emit(payload, args.json)
         return 0 if payload["status"] not in {
             "partial",
-            "credential_missing",
+            "configuration_missing",
             "model_selection_required",
         } else 2
     except ManagerError as exc:

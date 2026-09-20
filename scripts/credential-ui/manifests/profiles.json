@@ -3,16 +3,16 @@
   "profiles": {
     "default": [
       {
-        "manifest": "api-url.json",
-        "env": "CUSTOM_AGENT_BASE_URL"
-      },
-      {
-        "manifest": "default.json",
-        "env": "CUSTOM_AGENT_API_KEY"
-      },
-      {
         "manifest": "model.json",
         "env": "CUSTOM_AGENT_MODEL"
+      },
+      {
+        "manifest": "reasoning-effort.json",
+        "env": "CUSTOM_AGENT_REASONING_EFFORT"
+      },
+      {
+        "manifest": "vision.json",
+        "env": "CUSTOM_AGENT_VISION"
       }
     ]
   }

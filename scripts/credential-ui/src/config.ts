@@ -6,10 +6,10 @@ export class PublicError extends Error {
   status: number;
   constructor(message: string, status = 400) { super(message); this.status = status; }
 }
-export type InputType = 'password' | 'url' | 'text';
+export type InputType = 'password' | 'url' | 'text' | 'select';
 export type Manifest = {
   version: 1; id: string; label: string; credential: string;
-  ui?: { title?: string; placeholder?: string; saveLabel?: string; inputType?: InputType };
+  ui?: { title?: string; placeholder?: string; saveLabel?: string; inputType?: InputType; options?: string[] };
 };
 export const object = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
 export async function loadManifest(file: string): Promise<Manifest> {
@@ -23,10 +23,16 @@ export function validateManifest(m: unknown): Manifest {
     || typeof m.credential !== 'string' || !/^[a-z0-9][a-z0-9/_.-]{0,150}$/.test(m.credential)
     || Object.keys(m).some(k => !['version', 'id', 'label', 'credential', 'ui'].includes(k))) throw new PublicError('配置声明不合法。');
   if (m.ui !== undefined) {
-    if (!object(m.ui) || Object.entries(m.ui).some(([k, v]) =>
-      !['title', 'placeholder', 'saveLabel', 'inputType'].includes(k) || typeof v !== 'string' || !v.trim() || v.length > 80)
-      || (m.ui.inputType !== undefined && !['password', 'url', 'text'].includes(m.ui.inputType as string)))
+    if (!object(m.ui) || Object.keys(m.ui).some(k => !['title', 'placeholder', 'saveLabel', 'inputType', 'options'].includes(k))
+      || Object.entries(m.ui).some(([k, v]) => k !== 'options' && (typeof v !== 'string' || !v.trim() || v.length > 80))
+      || (m.ui.inputType !== undefined && !['password', 'url', 'text', 'select'].includes(m.ui.inputType as string)))
       throw new PublicError('页面配置不合法。');
+    const options = m.ui.options;
+    if (m.ui.inputType === 'select') {
+      if (!Array.isArray(options) || options.length < 2 || options.length > 12
+        || options.some(value => typeof value !== 'string' || !/^[a-z0-9][a-z0-9_-]{0,39}$/.test(value))
+        || new Set(options).size !== options.length) throw new PublicError('下拉选项不合法。');
+    } else if (options !== undefined) throw new PublicError('只有下拉字段可以声明选项。');
   }
   return m as Manifest;
 }
@@ -87,11 +93,14 @@ export function createStore(manifest: Manifest, backend: CredentialBackend) {
   async function validate(input: unknown) {
     if (!object(input) || typeof input.value !== 'string' || !input.value.trim() || input.value.length > 2500
       || /[\r\n\0]/.test(input.value) || typeof input.revision !== 'string'
-      || Object.keys(input).some(k => !['value', 'revision', 'replaceExisting'].includes(k))) throw new PublicError('请填写有效的单行密钥。');
+      || Object.keys(input).some(k => !['value', 'revision', 'replaceExisting'].includes(k))) throw new PublicError('请填写有效的单行配置值。');
     const current = await status();
-    if (current.revision !== input.revision) throw new PublicError('凭据已发生变化，请刷新后重试。', 409);
-    if (current.configured && input.replaceExisting !== true) throw new PublicError('已有凭据，请确认替换后保存。', 409);
-    return { value: input.value.trim() };
+    if (current.revision !== input.revision) throw new PublicError('配置已发生变化，请刷新后重试。', 409);
+    if (current.configured && input.replaceExisting !== true) throw new PublicError('已有配置，请确认替换后保存。', 409);
+    const value = input.value.trim();
+    if (manifest.ui?.inputType === 'select' && !manifest.ui.options?.includes(value))
+      throw new PublicError('请选择声明中的有效选项。');
+    return { value };
   }
   async function save(input: unknown) {
     if (busy) throw new PublicError('正在保存，请稍后。', 409);

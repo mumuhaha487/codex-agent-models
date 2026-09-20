@@ -6,7 +6,7 @@ import { readFile } from 'node:fs/promises';
 import { createStore, loadManifest, type CredentialBackend } from '../src/config.ts';
 import { startServer } from '../src/server.ts';
 
-const manifest = await loadManifest(fileURLToPath(new URL('../manifests/default.json', import.meta.url)));
+const manifest = await loadManifest(fileURLToPath(new URL('../manifests/model.json', import.meta.url)));
 const fake = 'TEST_ONLY_NOT_A_REAL_SECRET_12345';
 test('通用页面默认使用中性色，不引入未经配置的品牌色', async () => {
   const css = await readFile(new URL('../public/style.css', import.meta.url), 'utf8');
@@ -61,6 +61,14 @@ test('拒绝路径、旧 JSON 请求、空值、多行及超长密钥', async ()
     { revision, value: 'one\ntwo' }, { revision, value: 'x'.repeat(2501) }])
     await assert.rejects(store.save(input));
   assert.equal(m.writes(), 0);
+});
+test('下拉配置只接受声明中的选项', async () => {
+  const select = await loadManifest(fileURLToPath(new URL('../manifests/reasoning-effort.json', import.meta.url)));
+  const m = memory(); const store = createStore(select, m.backend);
+  const revision = (await store.status()).revision;
+  await assert.rejects(store.save({ revision, value: 'ultra' }), /有效选项/);
+  await store.save({ revision, value: 'medium' });
+  assert.equal(m.value(), 'medium');
 });
 test('HTTP 认证、Host 和跨站保护、脱敏及默认单字段占位框', async t => {
   const m = memory(); const emitted: object[] = [];
