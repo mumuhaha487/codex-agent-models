@@ -1,9 +1,9 @@
 ---
-name: codex-custom-subagent
-description: "配置、维护并使用一个由用户指定 Responses API URL、API Key 和模型 ID 的 Codex 原生只读子 Agent；适用于主 Agent 拆解任务、派发候选补丁、验收并迭代修订的工作流。普通 API 咨询或不需要子 Agent 的任务不触发。"
+name: deepseek
+description: "配置、维护并使用用户指定的 DeepSeek Responses API URL、API Key 和模型 ID 作为 Codex 原生只读子 Agent；适用于主 Agent 拆解任务、派发候选补丁、验收并迭代修订的工作流。普通 API 咨询或不需要子 Agent 的任务不触发。"
 ---
 
-# Codex Custom Subagent
+# deepseek
 
 本 Skill 管理 `CustomAgent` 原生子 Agent，并规定主 Agent 的派发和验收流程。确定性的配置、模型目录、凭据与测试操作交给 `scripts/codex_custom_agent.py`；不要手动修改受管 TOML、JSON、Agent 文件或系统凭据。
 
@@ -11,7 +11,7 @@ description: "配置、维护并使用一个由用户指定 Responses API URL、
 
 首次配置或更换服务时，先读 [API URL、Key 与模型配置](references/api-key-setup.md)。API URL、API Key 和精确模型 ID 都由用户在随附本机安全页面中填写，再由包装器注入业务进程；不要让用户把这些值贴进聊天，也不要把 Key 放进命令参数、日志或普通文件。
 
-网关必须兼容 OpenAI Responses API，并支持 Codex 所需的工具调用。API URL 必须是用户或网关给出的精确 Base URL；不得猜测或自行追加 `/v1` 或其他路径，但必须保留用户明确提供的合法路径。HTTP 只允许 localhost、回环或私有网络 IP，公网端点必须使用 HTTPS。兼容性和 Provider 继承规则见 [references/compatibility.md](references/compatibility.md)。
+网关必须兼容 OpenAI Responses API，并支持 Codex 所需的工具调用。API URL 必须是用户或网关给出的精确 Base URL；不得猜测或自行追加 `/v1` 或其他路径，但必须保留用户明确提供的合法路径。HTTP 只允许 localhost、回环或私有网络 IP，公网端点必须使用 HTTPS。兼容性和 Provider 继承规则见 [references/compatibility.md](references/compatibility.md)，真实故障签名见 [references/troubleshooting.md](references/troubleshooting.md)。
 
 ## 配置流程
 
@@ -20,7 +20,10 @@ description: "配置、维护并使用一个由用户指定 Responses API URL、
 3. 经 `profile.ts run default` 包装入口运行 `setup --base-url-env --api-key-env --model-env --json`。
 4. `setup`、`repair` 和 `test` 使用桌面内置 Codex 运行时。若返回 `new_task_required` 或 `restart_required`，提示用户重启 Codex 并打开新任务。
 5. 验收必须同时通过直连口令 `CUSTOM_AGENT_DIRECT_OK`、原生口令 `NATIVE_CUSTOM_AGENT_OK`，以及子线程数据库中的实际 Provider、精确模型、`high` 思考程度和 `CustomAgent` 角色。
-6. 最终只汇报状态、Provider、Base URL、模型、思考程度、角色和备份位置；不要输出 Key 或原始事件日志。
+6. 检查 `route_mode` 和 `credential_source`。`inherited_shared_gateway` 表示原生子 Agent 使用父 Provider 凭据，不使用专用系统凭据；父凭据必须支持目标子模型。
+7. 不得修改顶层父 `model_provider`、父 Provider 认证或 `auth.json` 来绕过继承。只支持子模型的 Key 用到父 Provider 会导致主 Codex 无法工作。
+8. 若设置页报告 `session-flags: features.thread_tools is ignored`，先确认当前 `config.toml` 已无 `thread_tools`。该字段不在当前功能列表中；磁盘配置已经清除时必须完全退出并重启 Codex，不能反复改写配置。
+9. 最终只汇报状态、Provider、凭据来源、Base URL、模型、思考程度、角色和备份位置；不要输出 Key 或原始事件日志。
 
 入口命令（macOS 使用 `python3`，Windows 使用可用的 Python 3 启动器）：
 
@@ -41,10 +44,13 @@ python3 <skill-dir>/scripts/codex_custom_agent.py <command> --json
 
 1. 先阅读项目约束，把需求拆成有依赖顺序的计划点；每一点写明范围、可验证验收标准和应运行的测试。
 2. 按依赖逐点调用 `spawn_agent(agent_type="CustomAgent", fork_turns="none")`。一次只派发一个边界明确的计划点，要求返回完整 unified diff/patch、测试命令和假设。
-3. 不直接信任候选结果。主 Agent 在隔离副本或临时 worktree 中应用补丁，检查范围并运行对应测试。
-4. 验收失败时，把具体文件/位置、失败命令或证据、预期行为和修改方向发回同一个子 Agent，要求完整修订补丁。继续用新证据迭代，不能只回复“验收不通过”。
-5. 只有候选补丁通过该计划点的全部验收标准后，主 Agent 才把它应用到真实工作区，并在真实工作区复测。然后再进入下一个计划点。
-6. 只有客观阻塞（缺少必要能力或外部状态）或需要用户作出重大选择时才停止；普通实现或测试失败必须继续反馈、修订和验收。
+3. 不得省略 `agent_type`、显式指定父模型或在失败后静默回退到 `worker`、`default` 等标准 Agent。失败时报告结构化错误；只有用户明确授权后才能使用其他 Agent。
+4. 不直接信任候选结果。主 Agent 在隔离副本或临时 worktree 中应用补丁，检查范围并运行对应测试。
+5. 验收失败时，把具体文件/位置、失败命令或证据、预期行为和修改方向发回同一个子 Agent，要求完整修订补丁。继续用新证据迭代，不能只回复“验收不通过”。
+6. 只有候选补丁通过该计划点的全部验收标准后，主 Agent 才把它应用到真实工作区，并在真实工作区复测。然后再进入下一个计划点。
+7. 只有客观阻塞（缺少必要能力或外部状态）或需要用户作出重大选择时才停止；普通实现或测试失败必须继续反馈、修订和验收。
+
+注册角色不等于把它设为默认子 Agent。若用户要求所有委派默认使用 `CustomAgent`，按 [故障排查文档](references/troubleshooting.md#注册角色不等于默认选择角色) 配置全局或项目 `AGENTS.md`，并在新任务中验证子线程数据库；不要根据 UI 标签或子 Agent 自述判断模型。
 
 如果当前工具 schema 不认识 `CustomAgent`，提示用户重启 Codex 并打开新任务；不要用管理脚本或 `codex exec` 代替日常编码子任务。
 
@@ -52,10 +58,12 @@ python3 <skill-dir>/scripts/codex_custom_agent.py <command> --json
 
 - `ready`：静态配置、直连、原生路由、数据库元数据和口令均通过。
 - `configured`：静态配置完整，尚未完成实时验收。
+- `partial`：静态配置不完整；检查 `checks`，其中 `unrecognized_feature_flags` 会列出需要由 `repair` 清除的旧功能标志。
 - `credential_missing`、`base_url_required`、`model_selection_required`：回到安全页面补齐三项，再继续原流程。
 - `operation_in_progress`：等待当前配置操作结束，不并发写配置。
 - `conflict`：报告冲突文件和字段，等待用户决定是否替换。
 - `unsupported`：报告缺少的系统能力，不手工绕过。
 - `failed`：读取结构化 `errors`；如果已回滚，不再手改受管文件。
+- `native_child_failed`：读取 `route_mode`、`credential_source` 和 `child_state`。共享网关继承路由优先检查父凭据是否有目标模型权限。
 
 默认使用当前 `CODEX_HOME`；只有用户明确指定其他 Codex Home 时才传 `--codex-home`。

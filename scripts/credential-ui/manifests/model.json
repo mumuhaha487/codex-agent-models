@@ -1,11 +1,11 @@
 {
   "version": 1,
   "id": "codex-custom-subagent-model",
-  "label": "自定义 Agent 模型 ID",
+  "label": "deepseek 模型 ID",
   "credential": "codex-custom-subagent/setup/model",
   "ui": {
-    "title": "配置自定义 Codex 子 Agent",
-    "placeholder": "例如 vendor-model-name",
+    "title": "配置 deepseek Codex 子 Agent",
+    "placeholder": "例如 deepseek-v4.1-flash",
     "inputType": "text",
     "saveLabel": "保存"
   }

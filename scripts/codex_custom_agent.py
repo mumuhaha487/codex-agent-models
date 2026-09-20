@@ -50,16 +50,20 @@ except ImportError:  # macOS / Linux
     msvcrt = None
 
 
+SKILL_NAME = "deepseek"
+LEGACY_RUNTIME_ID = "codex-custom-subagent"
 PROVIDER = "custom_agent"
+PROVIDER_DISPLAY_NAME = "deepseek"
 ROLE = "CustomAgent"
 EFFORT = "high"
 MODEL_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
 PARENT_MULTI_AGENT_VERSION = "v1"
 DESKTOP_MULTI_AGENT_V2 = False
+REMOVED_FEATURE_FLAGS = ("thread_tools",)
 MAX_STATE_DATABASES = 32
 METADATA_WAIT_SECONDS = 5.0
 LOCK_WAIT_SECONDS = 5.0
-CREDENTIAL_TARGET = "codex-custom-subagent-api-key"
+CREDENTIAL_TARGET = f"{LEGACY_RUNTIME_ID}-api-key"
 PROVIDER_BEGIN = "# BEGIN CODEX-CUSTOM-SUBAGENT PROVIDER"
 PROVIDER_END = "# END CODEX-CUSTOM-SUBAGENT PROVIDER"
 ROLE_BEGIN = "# BEGIN CODEX-CUSTOM-SUBAGENT ROLE"
@@ -99,8 +103,10 @@ def resolve_paths(codex_home: str | None) -> Paths:
         config=home / "config.toml",
         catalog=home / "models-with-custom-agent.json",
         agent=home / "agents" / f"{ROLE}.toml",
-        state_dir=home / "codex-custom-subagent",
-        manifest=home / "codex-custom-subagent" / "manifest.json",
+        # Keep the runtime state path stable so renaming the Skill does not lose
+        # the existing manifest, backups, or credential association.
+        state_dir=home / LEGACY_RUNTIME_ID,
+        manifest=home / LEGACY_RUNTIME_ID / "manifest.json",
     )
 
 
@@ -525,15 +531,41 @@ def remove_table_bool_if_value(text: str, table: str, key: str, expected: bool) 
     return "\n".join(kept).rstrip() + "\n"
 
 
+def remove_table_key(text: str, table: str, key: str) -> str:
+    lines = text.splitlines()
+    header = toml_table_header(table)
+    start = next((index for index, line in enumerate(lines) if header.match(line.strip())), None)
+    if start is None:
+        return text
+    end = next(
+        (index for index in range(start + 1, len(lines)) if lines[index].strip().startswith("[")),
+        len(lines),
+    )
+    pattern = re.compile(rf"^\s*{re.escape(key)}\s*=")
+    kept = [
+        line
+        for index, line in enumerate(lines)
+        if not (start < index < end and pattern.match(line))
+    ]
+    return "\n".join(kept).rstrip() + "\n"
+
+
+def removed_feature_flags(parsed: dict[str, Any]) -> list[str]:
+    features = parsed.get("features")
+    if not isinstance(features, dict):
+        return []
+    return [name for name in REMOVED_FEATURE_FLAGS if name in features]
+
+
 def expected_agent_text(model: str) -> str:
     return f'''name = {toml_string(ROLE)}
-description = "Read-only implementation subagent that returns complete candidate patches for parent-agent review."
+description = "Read-only deepseek implementation subagent that returns complete candidate patches for parent-agent review."
 model = {toml_string(model)}
 model_provider = {toml_string(PROVIDER)}
 model_reasoning_effort = {toml_string(EFFORT)}
 sandbox_mode = "read-only"
 developer_instructions = """
-You are a read-only implementation subagent running inside Codex.
+You are the read-only deepseek implementation subagent running inside Codex.
 
 Work only on the single bounded plan item assigned by the parent agent. Inspect the repository and reason about the implementation, but do not write to the shared workspace.
 Return a complete unified diff or patch that the parent can apply, together with relevant test commands and explicit assumptions. The patch must be self-contained for the assigned plan item.
@@ -575,7 +607,7 @@ def managed_provider_block(base_url: str) -> str:
     return f'''
 {PROVIDER_BEGIN}
 [model_providers.{PROVIDER}]
-name = "Custom Agent"
+name = {toml_string(PROVIDER_DISPLAY_NAME)}
 base_url = {toml_string(base_url)}
 wire_api = "responses"
 
@@ -592,7 +624,7 @@ def managed_role_block(paths: Paths) -> str:
     return f'''
 {ROLE_BEGIN}
 [agents.{ROLE}]
-description = "Read-only implementation subagent that returns complete candidate patches for parent-agent review."
+description = "Read-only deepseek implementation subagent that returns complete candidate patches for parent-agent review."
 config_file = {toml_string(str(paths.agent))}
 {ROLE_END}
 '''
@@ -626,7 +658,7 @@ def provider_conflicts(provider: dict[str, Any] | None, base_url: str) -> list[s
         return []
     issues: list[str] = []
     expected = {
-        "name": "Custom Agent",
+        "name": PROVIDER_DISPLAY_NAME,
         "base_url": base_url,
         "wire_api": "responses",
     }
@@ -811,6 +843,7 @@ def install(paths: Paths, codex_bin: str, selected_model: str, base_url: str) ->
     paths.home.mkdir(parents=True, exist_ok=True)
     config_text = paths.config.read_text(encoding="utf-8") if paths.config.is_file() else ""
     parsed = parse_toml_text(config_text) if config_text.strip() else {}
+    removed_flags = removed_feature_flags(parsed)
     previous_manifest = read_manifest(paths)
     provider_marker_present = PROVIDER_BEGIN in config_text and PROVIDER_END in config_text
     role_marker_present = ROLE_BEGIN in config_text and ROLE_END in config_text
@@ -903,6 +936,8 @@ def install(paths: Paths, codex_bin: str, selected_model: str, base_url: str) ->
         catalog_bytes = (json.dumps(catalog, ensure_ascii=False, indent=2) + "\n").encode()
 
         new_config = unmanaged_config
+        for flag in removed_flags:
+            new_config = remove_table_key(new_config, "features", flag)
         provider_exists = bool((unmanaged_parsed.get("model_providers") or {}).get(PROVIDER))
         if not provider_exists:
             new_config = new_config.rstrip() + "\n" + managed_provider_block(base_url)
@@ -931,7 +966,7 @@ def install(paths: Paths, codex_bin: str, selected_model: str, base_url: str) ->
                 catalog_original_backup = str(candidate)
         adopted_existing = provider_exists or agent_preexisted or catalog_preexisted
         manifest = {
-            "schema_version": 6,
+            "schema_version": 7,
             "installed_at": datetime.now().isoformat(timespec="seconds"),
             "backup": str(backup),
             "previous_model_catalog_json": previous_catalog_value,
@@ -949,6 +984,7 @@ def install(paths: Paths, codex_bin: str, selected_model: str, base_url: str) ->
             "managed_multi_agent_v2": managed_multi_agent_v2,
             "previous_multi_agent_v2": previous_multi_agent_v2,
             "desktop_multi_agent_v2": DESKTOP_MULTI_AGENT_V2,
+            "removed_feature_flags": removed_flags,
             "selected_model": selected_model,
             "base_url": base_url,
             "managed_models": list(custom_models),
@@ -957,11 +993,15 @@ def install(paths: Paths, codex_bin: str, selected_model: str, base_url: str) ->
             "agent_sha256": sha256_bytes(target_agent_text.encode()),
         }
         write_manifest(paths, manifest)
+        route = native_route_details(paths, parse_toml_text(new_config))
         return {
+            "skill_name": SKILL_NAME,
             "backup": str(backup),
             "adopted_existing": adopted_existing,
             "selected_model": selected_model,
             "base_url": base_url,
+            "removed_feature_flags": removed_flags,
+            **route,
         }
     except Exception:
         restore_backup(paths, backup)
@@ -994,6 +1034,9 @@ def static_status(paths: Paths, codex_bin: str | None = None) -> dict[str, Any]:
         except ManagerError as exc:
             checks["config_valid"] = False
             errors.append(str(exc))
+    legacy_flags = removed_feature_flags(parsed)
+    checks["unrecognized_feature_flags"] = legacy_flags
+    checks["unrecognized_feature_flags_absent"] = not legacy_flags
     provider = (parsed.get("model_providers") or {}).get(PROVIDER)
     role = (parsed.get("agents") or {}).get(ROLE)
     checks["provider_registered"] = bool(provider)
@@ -1013,6 +1056,12 @@ def static_status(paths: Paths, codex_bin: str | None = None) -> dict[str, Any]:
     parent_model = configured_parent_model(parsed)
     checks["parent_model"] = parent_model
     checks["parent_model_configured"] = bool(parent_model)
+    route = native_route_details(paths, parsed)
+    checks["native_route_mode"] = route["route_mode"]
+    checks["native_expected_provider"] = route["expected_provider"]
+    checks["native_credential_source"] = route["credential_source"]
+    checks["native_uses_dedicated_credential"] = route["uses_dedicated_credential"]
+    checks["parent_provider"] = route["parent_provider"]
     if paths.catalog.is_file():
         try:
             data = json.loads(paths.catalog.read_text(encoding="utf-8"))
@@ -1068,12 +1117,15 @@ def static_status(paths: Paths, codex_bin: str | None = None) -> dict[str, Any]:
         "manifest_exists",
         "role_registration_valid",
         "desktop_codex_detected",
+        "unrecognized_feature_flags_absent",
     )
     ready = all(checks.get(key) is True for key in required)
     return result(
         "configured" if ready else "partial",
+        skill_name=SKILL_NAME,
         selected_model=selected_model,
         base_url=base_url,
+        **route,
         checks=checks,
         errors=errors,
     )
@@ -1185,8 +1237,9 @@ def wait_for_child_metadata(
         time.sleep(min(poll_interval, remaining))
 
 
-def expected_native_provider(paths: Paths) -> tuple[str, str]:
-    parsed = parse_toml_text(paths.config.read_text(encoding="utf-8"))
+def native_route_details(paths: Paths, parsed: dict[str, Any] | None = None) -> dict[str, Any]:
+    if parsed is None:
+        parsed = parse_toml_text(paths.config.read_text(encoding="utf-8"))
     parent_provider = parsed.get("model_provider")
     provider = (parsed.get("model_providers") or {}).get(parent_provider)
     parent_base_url = provider.get("base_url") if isinstance(provider, dict) else None
@@ -1194,14 +1247,56 @@ def expected_native_provider(paths: Paths) -> tuple[str, str]:
         try:
             configured = configured_base_url(paths)
             if configured and normalize_base_url(parent_base_url) == configured:
-                return parent_provider, "inherited_shared_gateway"
+                return {
+                    "route_mode": "inherited_shared_gateway",
+                    "expected_provider": parent_provider,
+                    "parent_provider": parent_provider,
+                    "credential_source": "parent_provider",
+                    "uses_dedicated_credential": False,
+                }
         except ManagerError:
             pass
-    return PROVIDER, "dedicated_provider"
+    return {
+        "route_mode": "dedicated_provider",
+        "expected_provider": PROVIDER,
+        "parent_provider": parent_provider if isinstance(parent_provider, str) else None,
+        "credential_source": "custom_agent_system_credential",
+        "uses_dedicated_credential": True,
+    }
+
+
+def parse_native_events(stdout: str) -> tuple[list[str], dict[str, dict[str, Any]]]:
+    child_ids: list[str] = []
+    child_states: dict[str, dict[str, Any]] = {}
+    for line in stdout.splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        item = event.get("item") or {}
+        if (
+            event.get("type") == "item.completed"
+            and item.get("type") == "collab_tool_call"
+            and item.get("tool") == "spawn_agent"
+        ):
+            child_ids.extend(item.get("receiver_thread_ids") or [])
+        if (
+            event.get("type") == "item.completed"
+            and item.get("type") == "collab_tool_call"
+            and item.get("tool") == "wait"
+        ):
+            for receiver_id, state in (item.get("agents_states") or {}).items():
+                if isinstance(state, dict):
+                    child_states[receiver_id] = {
+                        "status": state.get("status"),
+                        "message": state.get("message"),
+                    }
+    return child_ids, child_states
 
 
 def native_test(paths: Paths, codex_bin: str, selected_model: str) -> dict[str, Any]:
     parent_model = choose_parent_model(paths)
+    route = native_route_details(paths)
     env = dict(os.environ)
     env["CODEX_HOME"] = str(paths.home)
     prompt = (
@@ -1234,49 +1329,40 @@ def native_test(paths: Paths, codex_bin: str, selected_model: str) -> dict[str, 
         raise ManagerError(
             "native_test_failed",
             "新 Codex 任务中的原生 spawn_agent 测试失败。",
-            {"stderr": proc.stderr[-1200:]},
+            {**route, "stderr": proc.stderr[-1200:]},
         )
-    child_ids: list[str] = []
-    child_messages: dict[str, str] = {}
-    for line in proc.stdout.splitlines():
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        item = event.get("item") or {}
-        if (
-            event.get("type") == "item.completed"
-            and item.get("type") == "collab_tool_call"
-            and item.get("tool") == "spawn_agent"
-        ):
-            child_ids.extend(item.get("receiver_thread_ids") or [])
-        if (
-            event.get("type") == "item.completed"
-            and item.get("type") == "collab_tool_call"
-            and item.get("tool") == "wait"
-        ):
-            for receiver_id, state in (item.get("agents_states") or {}).items():
-                if not isinstance(state, dict):
-                    continue
-                message = state.get("message")
-                if state.get("status") == "completed" and isinstance(message, str):
-                    child_messages[receiver_id] = message.strip()
+    child_ids, child_states = parse_native_events(proc.stdout)
     child_id = child_ids[0] if len(child_ids) == 1 else None
-    child_message = child_messages.get(child_id) if child_id else None
+    child_state = child_states.get(child_id) if child_id else None
+    raw_message = child_state.get("message") if child_state else None
+    child_message = raw_message.strip() if isinstance(raw_message, str) else None
     metadata = wait_for_child_metadata(paths, child_id) if child_id else None
-    expected_provider, route_mode = expected_native_provider(paths)
     expected = {
-        "model_provider": expected_provider,
+        "model_provider": route["expected_provider"],
         "model": selected_model,
         "reasoning_effort": EFFORT,
         "agent_role": ROLE,
     }
+    if child_state and child_state.get("status") not in {None, "completed"}:
+        raise ManagerError(
+            "native_child_failed",
+            "原生 CustomAgent 子线程启动或执行失败。",
+            {
+                **route,
+                "child_id": child_id,
+                "child_state": child_state,
+                "metadata": metadata,
+                "expected": expected,
+            },
+        )
     if len(child_ids) != 1 or child_message != "NATIVE_CUSTOM_AGENT_OK" or metadata != expected:
         raise ManagerError(
             "native_route_mismatch",
             "原生子 Agent 路由验收证据不完整或不符合自定义配置。",
             {
+                **route,
                 "child_ids": child_ids,
+                "child_state": child_state,
                 "child_message": child_message,
                 "metadata": metadata,
                 "expected": expected,
@@ -1285,8 +1371,8 @@ def native_test(paths: Paths, codex_bin: str, selected_model: str) -> dict[str, 
     return {
         "desktop_fresh_session_native": True,
         "child_id": child_id,
-        "route_mode": route_mode,
         "configured_provider": PROVIDER,
+        **route,
         **expected,
     }
 

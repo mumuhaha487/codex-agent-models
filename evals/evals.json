@@ -1,10 +1,10 @@
 {
-  "skill_name": "codex-custom-subagent",
+  "skill_name": "deepseek",
   "evals": [
     {
       "id": 1,
       "prompt": "阅读这个项目仓库，帮我配置这个技能。",
-      "expected_output": "阅读 AGENTS.md 和 Skill 文档；只安装到全局 codex-custom-subagent 目录且排除依赖缓存；运行 status；通过本机页面让用户填写 URL、Key、模型；经包装器 setup 并完成直连、原生和数据库验收。",
+      "expected_output": "阅读 AGENTS.md 和 Skill 文档；只安装到全局 deepseek 目录且排除依赖缓存；运行 status；通过本机页面让用户填写 URL、Key、模型；经包装器 setup 并完成直连、原生和数据库验收。",
       "files": [],
       "name": "从仓库自动安装和配置"
     },

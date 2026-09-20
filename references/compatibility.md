@@ -17,7 +17,11 @@
 - 状态与备份：`$CODEX_HOME/codex-custom-subagent/`
 - 运行时 Key：系统凭据目标 `codex-custom-subagent-api-key`
 
+Skill 的公开名称和安装目录为 `deepseek`。上面的状态目录与凭据目标是为了从旧版 `codex-custom-subagent` 无损升级而保留的内部兼容标识，不应据此安装第二个旧名称 Skill。
+
 程序不修改顶层 `model` 或 `model_provider`。自定义模型元数据从当前父模型条目深拷贝，再只替换自定义模型标识、显示名、说明、文本输入能力、`high` 默认思考程度和 `v1` 多 Agent 版本。
+
+当前运行时功能列表包含 `multi_agent` 与 `multi_agent_v2`，但不包含旧字段 `thread_tools`。`setup` 或 `repair` 会从 `[features]` 清除该旧字段并在结果中报告 `removed_feature_flags`。如果设置页仍显示 `session-flags: features.thread_tools is ignored` 而磁盘配置已无该字段，警告来自启动时缓存；完全退出并重启 Codex 后再检查。
 
 ## 原生派发验收
 
@@ -32,6 +36,13 @@ spawn_agent(agent_type="CustomAgent", fork_turns="none", ...)
 实时验收必须同时确认子 Agent 返回 `NATIVE_CUSTOM_AGENT_OK`，以及 `$CODEX_HOME/state_*.sqlite` 的 `threads` 元数据：精确模型 ID、`high`、`CustomAgent` 和实际 Provider。
 
 当前运行时可能让自定义 Agent 继承父 Provider。只有父 Provider 的规范化 Base URL 与用户配置 URL 完全一致时，才接受该实际 Provider，并报告 `route_mode = inherited_shared_gateway`；否则数据库记录必须是 `custom_agent`。子 Agent 自述不能替代数据库证据。
+
+`status --json` 和实时测试同时报告凭据来源：
+
+- `credential_source = parent_provider`、`uses_dedicated_credential = false`：原生子 Agent 使用父 Provider 凭据。父账号必须同时支持父模型和子模型。
+- `credential_source = custom_agent_system_credential`、`uses_dedicated_credential = true`：原生子 Agent 使用本 Skill 的专用系统凭据。
+
+直连测试始终使用专用系统凭据，因此“直连通过、原生失败”通常表示两条路径的凭据能力不同。管理程序不修改顶层 `model_provider`、父 Provider 认证或 `auth.json`；不得手工用只支持子模型的 Key 替换父凭据。
 
 ## URL 与凭据
 

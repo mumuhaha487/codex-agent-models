@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import subprocess
 import sys
@@ -128,6 +129,108 @@ class StdioEncodingTests(unittest.TestCase):
         error = completed.stderr.decode("utf-8")
         self.assertIn("配置并验证用户指定模型作为 Codex 原生子 Agent", output)
         self.assertEqual(error, "")
+
+
+class ConfigCompatibilityTests(unittest.TestCase):
+    def test_removed_feature_flag_is_deleted_without_touching_valid_flags(self) -> None:
+        text = (
+            "[features]\n"
+            "thread_tools = true\n"
+            "multi_agent_v2 = false\n"
+            "\n"
+            "[desktop]\n"
+            'localeOverride = "zh-CN"\n'
+        )
+
+        updated = MANAGER.remove_table_key(text, "features", "thread_tools")
+
+        parsed = MANAGER.parse_toml_text(updated)
+        self.assertNotIn("thread_tools", parsed["features"])
+        self.assertIs(parsed["features"]["multi_agent_v2"], False)
+        self.assertEqual(parsed["desktop"]["localeOverride"], "zh-CN")
+
+    def test_removed_feature_flag_is_reported(self) -> None:
+        parsed = {"features": {"thread_tools": True, "multi_agent_v2": False}}
+
+        self.assertEqual(MANAGER.removed_feature_flags(parsed), ["thread_tools"])
+
+
+class NativeRouteTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.paths = MANAGER.resolve_paths(self.temporary.name)
+        self.paths.home.mkdir(parents=True, exist_ok=True)
+        self.paths.state_dir.mkdir(parents=True, exist_ok=True)
+        self.paths.config.write_text(
+            'model_provider = "parent"\n'
+            '[model_providers.parent]\n'
+            'base_url = "https://gateway.example/v1"\n',
+            encoding="utf-8",
+        )
+
+    def write_manifest(self, base_url: str) -> None:
+        self.paths.manifest.write_text(
+            json.dumps({"base_url": base_url}),
+            encoding="utf-8",
+        )
+
+    def test_shared_gateway_reports_parent_credential_source(self) -> None:
+        self.write_manifest("https://gateway.example/v1/")
+
+        route = MANAGER.native_route_details(self.paths)
+
+        self.assertEqual(route["route_mode"], "inherited_shared_gateway")
+        self.assertEqual(route["expected_provider"], "parent")
+        self.assertEqual(route["credential_source"], "parent_provider")
+        self.assertFalse(route["uses_dedicated_credential"])
+
+    def test_distinct_gateway_reports_dedicated_credential_source(self) -> None:
+        self.write_manifest("https://custom.example/v1/")
+
+        route = MANAGER.native_route_details(self.paths)
+
+        self.assertEqual(route["route_mode"], "dedicated_provider")
+        self.assertEqual(route["expected_provider"], MANAGER.PROVIDER)
+        self.assertEqual(route["credential_source"], "custom_agent_system_credential")
+        self.assertTrue(route["uses_dedicated_credential"])
+
+    def test_native_event_parser_preserves_failed_child_state(self) -> None:
+        output = "\n".join(
+            [
+                json.dumps(
+                    {
+                        "type": "item.completed",
+                        "item": {
+                            "type": "collab_tool_call",
+                            "tool": "spawn_agent",
+                            "receiver_thread_ids": ["child-1"],
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "item.completed",
+                        "item": {
+                            "type": "collab_tool_call",
+                            "tool": "wait",
+                            "agents_states": {
+                                "child-1": {
+                                    "status": "failed",
+                                    "message": "model is not supported by the parent account",
+                                }
+                            },
+                        },
+                    }
+                ),
+            ]
+        )
+
+        child_ids, states = MANAGER.parse_native_events(output)
+
+        self.assertEqual(child_ids, ["child-1"])
+        self.assertEqual(states["child-1"]["status"], "failed")
+        self.assertIn("parent account", states["child-1"]["message"])
 
 
 if __name__ == "__main__":

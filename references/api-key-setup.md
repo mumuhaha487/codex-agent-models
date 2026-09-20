@@ -24,6 +24,8 @@ API URL 必须按用户或网关文档给出的精确 Base URL 填写。不要�
 | API Key | `CUSTOM_AGENT_API_KEY` | `codex-custom-subagent/setup/api-key` |
 | 模型 ID | `CUSTOM_AGENT_MODEL` | `codex-custom-subagent/setup/model` |
 
+系统凭据引用沿用旧版 `codex-custom-subagent` 标识，以便升级为 `$deepseek` 后继续使用现有秘密；这是内部兼容标识，不是 Skill 的公开名称。
+
 切换服务时应在同一页面核对三项。保存成功只证明值可安全读取；实际端点和模型能力以业务测试为准。
 
 ## 运行业务
