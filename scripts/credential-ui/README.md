@@ -13,11 +13,11 @@
 ```bash
 npm ci --ignore-scripts
 node src/profile.ts status default
-node src/profile.ts setup default
+node src/profile.ts setup default --confirmed
 node src/profile.ts run default -- your-program your-arguments
 ```
 
-`status` 退出码 0 表示三项都存在，2 表示至少一项缺失。`setup` 返回 30 分钟有效的 localhost 链接；用户亲自填写，Agent 不自动操作页面。`run` 只向指定子进程注入当前 profile 的值。
+`status` 退出码 0 表示三项都存在，2 表示至少一项缺失。`setup` 只有在完成独立第二轮“已确认”后才允许传入 `--confirmed`，并返回 30 分钟有效的 localhost 链接；用户亲自填写，Agent 不自动操作页面。`run` 只向指定子进程注入当前 profile 的值。
 
 ## 字段声明
 

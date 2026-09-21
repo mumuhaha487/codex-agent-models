@@ -1,39 +1,19 @@
-# deepseek
+# CustomAgent 模型配置技能
 
-把父 Provider 已经可以访问的模型配置成 Codex 原生只读 `CustomAgent`。配置页只包含三个字段：
+把父 Provider 已经可以访问的模型配置成 Codex 原生可写 `CustomAgent`。设置页只有三个字段：
 
-- 子代理模型
+- 子代理模型：首次配置必须填写，仓库不提供默认值
 - 思考强度：`low`、`medium`、`high`
 - 支持识图：`yes`、`no`
 
-本 Skill 不收集 API URL 或 API Key，不创建独立 Provider，也不修改父 `model_provider`、父认证或 `auth.json`。子代理始终复用当前 Codex 顶层 Provider 和凭据。
+本 Skill 不收集或修改 API URL、API Key、父 Provider 与认证。唯一允许修改的 Codex 配置文件是 `$CODEX_HOME/agents/CustomAgent.toml`；`config.toml` 只读并进行前后哈希保护。
 
 用户可以把本仓库交给 Codex，然后说：
 
 > 阅读这个项目仓库，帮我配置这个技能
 
-[AGENTS.md](AGENTS.md) 会引导 Codex 在全局 `deepseek` Skill 目录安装、打开本机设置页、执行静态检查和原生子代理验收。安装和排障只能操作全局 Skill、`CODEX_HOME` 或隔离临时目录，不得修改用户当前业务项目。
+持久化配置受独立第二轮 `已确认` 保护。确认后，Codex 安装全局 Skill、打开只含三个字段的本机页面、生成 `CustomAgent.toml`，并执行原生可写子智能体验收。
 
-## 识图
+子智能体只在主 Agent 管理的隔离 Git worktree 中直接修改代码。主 Agent 负责验收、整合、回退和清理；任一失败计数达到 5 时由主 Agent 接管，不调用第 6 次。
 
-选择 `yes` 会在模型目录中声明 `input_modalities = ["text", "image"]`，并要求 `CustomAgent` 直接检查委派中附带的图片。选择 `no` 时只声明文本输入，由主 Agent 查看图片后提供文本观察。
-
-开关只是声明已知能力，不会探测模型，也不能为不支持图片的模型增加视觉能力。无法确认时应选 `no`。
-
-## 要求
-
-- Codex 桌面应用
-- Python 3.11+
-- Node.js 22.18+
-- 当前父 Provider 的凭据能访问所选子代理模型
-
-## 验收标准
-
-只有以下证据全部一致才报告成功：
-
-1. 父 Provider 直连返回 `CUSTOM_AGENT_DIRECT_OK`。
-2. 原生子代理返回 `NATIVE_CUSTOM_AGENT_OK`。
-3. 子线程数据库记录为父 Provider、精确子模型、所选思考强度和 `CustomAgent`。
-4. 模型目录中的输入模态与识图开关一致。
-
-完整流程见 [SKILL.md](SKILL.md)，故障原因见 [references/troubleshooting.md](references/troubleshooting.md)。
+仓库的真实功能必须存在于默认 `main` 分支。普通修改和上传不得自行创建额外分支；隔离回退所需的临时任务分支在完成后立即清理。

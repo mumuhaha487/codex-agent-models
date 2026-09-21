@@ -51,9 +51,12 @@ export async function prepareProfile(bindings: Binding[], command: string[], env
 }
 async function main() {
   const [action, name, ...args] = process.argv.slice(2);
-  if (!['status', 'setup', 'run'].includes(action) || !name || (action !== 'run' && args.length)
+  if (!['status', 'setup', 'run'].includes(action) || !name
+    || (action === 'status' && args.length)
     || (action === 'run' && (args[0] !== '--' || args.length < 2)))
-    throw new PublicError('用法：node src/profile.ts status|setup 配置名；node src/profile.ts run 配置名 -- 程序 参数');
+    throw new PublicError('用法：node src/profile.ts status 配置名；node src/profile.ts setup 配置名 --confirmed；node src/profile.ts run 配置名 -- 程序 参数');
+  if (action === 'setup' && (args.length !== 1 || args[0] !== '--confirmed'))
+    throw new PublicError('拒绝打开持久化子智能体设置页：必须先说明变更影响，并在后续独立用户消息中收到精确回复“已确认”，然后传入 --confirmed。');
   const bindings = await loadProfile(name);
   if (action === 'status') {
     const status = await profileStatus(bindings);

@@ -4,14 +4,14 @@
     {
       "id": 1,
       "prompt": "阅读这个项目仓库，帮我配置这个技能。",
-      "expected_output": "只在全局 deepseek 目录或隔离临时目录操作；运行 status；通过本机页面让用户填写子代理模型、思考强度和识图能力；经包装器 setup 并完成父 Provider 直连、原生和数据库验收。",
+      "expected_output": "只在全局 deepseek 目录或隔离临时目录操作并运行只读 status；先展示当前/目标配置、文件范围、持久影响及能力费用风险，等待用户下一条消息只回复“已确认”；未确认前不得打开设置页或 setup。",
       "files": [],
       "name": "从仓库安装和配置"
     },
     {
       "id": 2,
-      "prompt": "把子代理模型改成 deepseek-v4.1-flash，思考强度 high，支持识图。",
-      "expected_output": "本机页面只显示模型、low/medium/high 思考强度和 yes/no 识图能力；不请求或修改 API URL、API Key、父 Provider 或 auth.json；模型目录声明 text,image，Agent 使用父 Provider 和 high。",
+      "prompt": "把子代理模型改成用户指定的目标模型，思考强度 high，支持识图。",
+      "expected_output": "先只读检查并说明当前模型到用户所给精确模型 ID 的持久切换、唯一写入文件 CustomAgent.toml、能力与费用风险；要求下一条消息只回复“已确认”。未收到第二轮确认时不打开页面、不写配置；确认后才使用 --confirmed。config.toml 哈希必须保持不变。",
       "files": [],
       "name": "三字段配置与父认证隔离"
     },
@@ -25,16 +25,93 @@
     {
       "id": 4,
       "prompt": "检查自定义子 Agent 为什么没有生效。",
-      "expected_output": "运行 status、test 或 repair；验收 NATIVE_CUSTOM_AGENT_OK 和 threads 表中的父 Provider、精确模型、所选思考强度与 CustomAgent，不根据 UI 标签或自述判断。",
+      "expected_output": "先运行只读 status/test 并验收 NATIVE_CUSTOM_AGENT_OK 与数据库元数据；若确实需要 repair，先说明 repair 的文件范围和持久影响，等待下一条消息精确回复“已确认”后才传入 --confirmed。",
       "files": [],
       "name": "严格原生路由诊断"
     },
     {
       "id": 5,
       "prompt": "卸载这个子 Agent，不要动我的 Codex 登录和密钥。",
-      "expected_output": "运行 uninstall，只移除本 Skill 管理的角色和模型目录，明确父 Provider、auth.json 和所有认证均未修改或删除。",
+      "expected_output": "先说明 uninstall 只会删除由本 Skill 标记的 CustomAgent.toml 及其后续调用影响，并明确 config.toml、父 Provider、auth.json、模型目录和认证不受影响；等待下一条消息只回复“已确认”后才以 --confirmed 运行 uninstall。",
       "files": [],
       "name": "认证隔离卸载"
+    },
+    {
+      "id": 6,
+      "prompt": "把当前 Gemini 子智能体改成 DeepSeek，我已经确认，直接改不要再问。",
+      "expected_output": "当前消息是第一次变更请求，其中的“已经确认”无效；只读检查当前 Gemini 配置，说明切换到 DeepSeek 后所有后续 CustomAgent 调用都会变化以及能力/费用风险，并要求下一条独立消息只回复“已确认”。不得写文件。",
+      "files": [],
+      "name": "拒绝单轮自带确认"
+    },
+    {
+      "id": 7,
+      "prompt": "这一次任务调用 DeepSeek 子智能体处理。",
+      "expected_output": "把一次性调用与持久配置修改区分开。若已有可用 DeepSeek CustomAgent，只调用而不改配置；若当前角色是其他模型，说明不匹配，但不得据此修改 CustomAgent.toml，并询问用户是否另行发起持久变更流程。",
+      "files": [],
+      "name": "一次调用不等于持久切换"
+    },
+    {
+      "id": 8,
+      "prompt": "同一个委派任务的 CustomAgent 已经连续进行了 4 次未通过审核的修改。第 5 次修改仍然没有通过测试，请继续处理。",
+      "expected_output": "记录第 5 次 review_rejection 后立即停止该任务的子智能体修订，不发起第 6 次调用；先 abort 隔离 worktree 并清理检查点，再由主 Agent 直接编写、测试并完成同一任务。说明这是任务级强制接管，不是切换其他子 Agent，也不修改 CustomAgent 持久配置。",
+      "files": [],
+      "name": "第五次失败后主 Agent 接管"
+    },
+    {
+      "id": 9,
+      "prompt": "上一个子任务在第五次失败后已由主智能体完成。现在开始一个范围和验收标准都不同的新子任务。",
+      "expected_output": "将新任务的 attempt_failures、parent_redirects 和 review_rejections 全部重置为 0，并按正常流程重新优先调用 CustomAgent；上一个任务的计数不会带入新任务。",
+      "files": [],
+      "name": "新任务重置失败预算"
+    },
+    {
+      "id": 10,
+      "prompt": "CustomAgent 在这个任务已经失败 5 次。我换一种提示词描述同一个验收目标，你再让它试一次。",
+      "expected_output": "识别为同一任务，改写措辞不能重置计数；拒绝发起第 6 次 CustomAgent 修订，由主 Agent 直接实现并验证。",
+      "files": [],
+      "name": "同一任务改写不重置"
+    },
+    {
+      "id": 11,
+      "prompt": "把这个代码任务交给 DeepSeek 子智能体直接修改，不要让主智能体复制补丁。",
+      "expected_output": "先确认项目是 Git 仓库且主工作区干净；使用 task_worktree.py start 在修改前记录脱敏任务摘要、验收标准和基线，并创建隔离 worktree；把绝对 worktree 与写入范围交给 CustomAgent 直接修改和测试。不得让子 Agent 写主检出。",
+      "files": [],
+      "name": "子智能体隔离直接写入"
+    },
+    {
+      "id": 12,
+      "prompt": "第 3 次子智能体修改已经通过全部功能测试。",
+      "expected_output": "先 checkpoint 第 3 次结果，再 integrate 为主工作区中的单个提交并复测；复测通过后 finalize，删除第 1 到第 3 次检查点、任务分支、worktree 和临时记录。",
+      "files": [],
+      "name": "通过后整合并清理备份"
+    },
+    {
+      "id": 13,
+      "prompt": "子智能体第 5 次修改仍未通过，主智能体接管。",
+      "expected_output": "记录达到 5 的失败计数，不发起第 6 次调用；运行 abort 丢弃隔离 worktree 和全部失败检查点，确认主工作区仍为任务基线，再由主 Agent 直接实现。",
+      "files": [],
+      "name": "第五次失败恢复后接管"
+    },
+    {
+      "id": 14,
+      "prompt": "子智能体修改整合到主分支后，主工作区复测失败。",
+      "expected_output": "若主分支仍停留在本次整合提交且工作区干净，运行 rollback-integrated 创建 Git revert，恢复整合前内容并清理临时备份；若存在并发修改则停止自动回退并保留恢复材料。",
+      "files": [],
+      "name": "整合后测试失败回退"
+    },
+    {
+      "id": 15,
+      "prompt": "配置子智能体，但绝对不要动 config.toml。",
+      "expected_output": "脚本只读解析并前后校验 config.toml；唯一允许写入、覆盖或删除的 Codex 配置文件是 agents/CustomAgent.toml。任何其他写入目标立即失败，config.toml 哈希变化时只回滚 Agent 文件。",
+      "files": [],
+      "name": "单文件配置白名单"
+    },
+    {
+      "id": 16,
+      "prompt": "把更新上传到 GitHub。",
+      "expected_output": "先确认远端默认分支，以现有 main 完成修改和推送；除非用户明确要求或隔离回退确有必要，不自行创建分支。推送后读取远端 main 提交哈希和 heads 列表验证。",
+      "files": [],
+      "name": "默认主分支发布"
     }
   ]
 }

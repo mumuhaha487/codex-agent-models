@@ -3,47 +3,44 @@
 ## 支持范围
 
 - macOS、Windows、Python 3.11+，Codex 桌面应用至少启动过一次。
-- 精确模型 ID 长度不超过 128，只含字母、数字、点、下划线、冒号、斜杠或连字符。
+- 模型 ID 长度不超过 128，只含字母、数字、点、下划线、冒号、斜杠或连字符。
 - 思考强度只允许 `low`、`medium`、`high`。
-- 识图能力只允许 `yes` 或 `no`。
-- 父 Provider 必须能够通过当前认证访问目标模型，并支持 Codex 所需的 Responses 工具调用。
+- 识图选项只允许 `yes` 或 `no`。
+- 父 Provider 必须能通过当前认证访问目标模型，并支持 Codex 所需的 Responses 工具调用。
 
-## 受管位置
+## Codex 配置边界
 
-- Codex 配置：`$CODEX_HOME/config.toml`
-- 合并模型目录：`$CODEX_HOME/models-with-custom-agent.json`
-- Agent 文件：`$CODEX_HOME/agents/CustomAgent.toml`
-- 状态与备份：`$CODEX_HOME/codex-custom-subagent/`
-
-状态目录沿用旧名称只为兼容历史备份。公开 Skill 名称是 `deepseek`。
-
-## Provider 与认证
-
-程序从顶层 `model_provider` 读取父 Provider，并把同一个值写入 `CustomAgent.toml`。它不会：
-
-- 创建 `[model_providers.custom_agent]`。
-- 修改顶层 `model_provider`。
-- 修改父 Provider 表或认证子表。
-- 读取或写入 `auth.json`。
-- 保存、替换或删除 API Key。
-
-旧版 Skill 自己用 `BEGIN/END CODEX-CUSTOM-SUBAGENT PROVIDER` 标记包围的 Provider 块会在升级时移除。没有该标记的用户配置不会被当作受管 Provider 删除。
-
-## 模型目录
-
-自定义条目从当前父模型条目深拷贝，只替换子模型标识、说明、默认思考强度、输入模态和 `multi_agent_version = "v1"`。
-
-- 识图 `yes`：`input_modalities = ["text", "image"]`，`supports_image_detail_original = true`。
-- 识图 `no`：`input_modalities = ["text"]`，`supports_image_detail_original = false`。
-
-父模型的 `multi_agent_version` 同步设为 `v1`，`features.multi_agent_v2` 设为 `false`，以使用当前可验证的原生派发路径。`repair` 会清除已失效的 `features.thread_tools`，但保留其他有效功能标志。
-
-## 原生验收
-
-日常调用必须显式使用：
+唯一可写文件：
 
 ```text
-spawn_agent(agent_type="CustomAgent", fork_turns="none", ...)
+$CODEX_HOME/agents/CustomAgent.toml
 ```
 
-实时验收检查子 Agent 口令和 `$CODEX_HOME/state_*.sqlite` 的 `threads` 元数据：父 Provider、精确模型、所选思考强度和 `CustomAgent` 角色。子 Agent 自述或 UI 标签不能替代数据库证据。
+只读保护文件：
+
+```text
+$CODEX_HOME/config.toml
+```
+
+脚本从顶层 `model_provider` 读取父 Provider，并把该字符串写入 Agent 文件。脚本不会：
+
+- 修改、恢复、格式化或清理 `config.toml`。
+- 读取或写入 `auth.json`。
+- 创建独立 Provider 或替换父认证。
+- 创建或选择模型目录。
+- 写入状态清单、配置备份、角色注册块或功能标志。
+- 保存、替换或删除 API URL 与 API Key。
+
+文件白名单由代码强制检查。操作前后会比较 `config.toml` 哈希；检测到变化时，脚本不碰主配置，只撤销本次 Agent 文件变更。
+
+## Agent 行为
+
+`CustomAgent.toml` 包含目标模型、父 Provider、`model_reasoning_effort`、`sandbox_mode = "workspace-write"`、识图标记和隔离工作指令。Agent 文件由 Codex 自动发现，不需要在 `config.toml` 添加角色注册块。
+
+识图选项不修改模型目录。`yes` 表示用户确认模型支持图片，并要求子智能体直接使用附带图片；`no` 表示只使用文本，由主 Agent 提供视觉观察。
+
+## Git 隔离
+
+日常调用显式使用 `spawn_agent(agent_type="CustomAgent", fork_turns="none")`。可写任务必须在 `task_worktree.py start` 创建的隔离 worktree 中运行；主工作区不干净时拒绝启动，不自动 stash、提交、reset 或清理用户修改。
+
+任务分支仅用于该必要的隔离回退流程，完成后立即清理。普通仓库修改与上传直接使用现有主分支，不自行增加分支。

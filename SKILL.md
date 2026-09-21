@@ -1,79 +1,77 @@
 ---
 name: deepseek
-description: "配置、维护并使用用户指定模型作为 Codex 原生只读 CustomAgent；模型复用当前父 Provider 与认证，可设置 low/medium/high 思考强度和是否支持识图。适用于主 Agent 派发候选补丁并闭环验收的工作流。普通 API 咨询或不需要子 Agent 的任务不触发。"
+description: "配置、维护并使用用户指定模型作为 Codex 原生可写 CustomAgent；只允许写入 agents/CustomAgent.toml，继承父 Provider 与认证，并在隔离 Git worktree 中直接修改代码。任何持久化子智能体配置变更都必须经过独立第二轮“已确认”。"
 ---
 
 # deepseek
 
-本 Skill 管理 Codex 原生 `CustomAgent`。它只设置子代理模型、思考强度和输入模态；始终继承当前 `config.toml` 顶层 `model_provider` 及其认证。
+本 Skill 管理 Codex 原生 `CustomAgent`。网页只收集模型、思考强度和是否支持识图；API URL、API Key、父 Provider 与认证始终沿用当前 Codex 配置。
 
-## 安全边界
+## 配置写入边界
 
-- 不收集、不保存、不修改 API URL 或 API Key。
-- 不修改顶层 `model_provider`、父 Provider 表、父 Provider 认证或 `auth.json`。
-- 不注册独立子代理 Provider。升级时只移除旧版 Skill 自己用标记包围的 Provider 块。
-- 模型必须能通过父 Provider 的现有凭据访问；否则原生子代理不能工作。
-- 安装和排障只操作全局 Skill、`CODEX_HOME` 或隔离临时目录，不在用户业务项目中创建调试文件。
+- 唯一允许写入、覆盖或删除的 Codex 配置文件是 `$CODEX_HOME/agents/CustomAgent.toml`。
+- `$CODEX_HOME/config.toml` 只能只读解析父 `model_provider`，并在操作前后校验 SHA-256；绝不修改、恢复、格式化或清理它。
+- 不读写 `auth.json`，不收集 URL 或 API Key，不创建独立 Provider。
+- 不创建或修改模型目录、状态清单、角色注册块、功能标志或配置备份文件。
+- 设置页只把三个非认证选项保存在当前用户的系统凭据后端，用于一次性注入管理脚本。
+- `supports_vision` 只控制 `CustomAgent.toml` 中的能力标记和行为指令；目标模型及父 Provider 本身必须真实支持图片。
 
-原因和恢复方法见 [原生路由故障排查](references/troubleshooting.md)。配置字段说明见 [子代理设置](references/configuration.md)，模型目录规则见 [兼容性与安全边界](references/compatibility.md)。
+任何代码路径若尝试写入白名单之外的位置必须立即失败。`config.toml` 哈希发生变化时，只回滚本次 `CustomAgent.toml` 写入，不得动主配置。
+
+## 持久化配置二次确认
+
+创建、修改、覆盖、修复、停用或删除 `CustomAgent.toml` 前必须二次确认：
+
+1. 第一次收到请求时只运行 `status --json`，说明当前值、目标值、唯一写入文件、后续持久影响，以及模型能力、费用和行为变化风险。
+2. 要求用户在下一条独立消息中只回复 `已确认`。首次请求里附带的确认无效。
+3. 仅在收到精确回复后运行带 `--confirmed` 的命令。
+4. 模型、思考强度、识图选项或文件范围变化后，原确认失效，必须重新确认。
+
+只调用已配置的 `CustomAgent`、运行 `status` 或不写配置的 `test` 不需要确认。
 
 ## 配置流程
 
-1. 运行 `status --json`。
-2. 首次安装、字段缺失或用户要求更换时，运行 `node <skill-dir>/scripts/credential-ui/src/profile.ts setup default`，展示 localhost 页面并让用户亲自填写：
-   - 子代理模型：精确模型 ID。
+1. 运行 `python3 <skill-dir>/scripts/codex_custom_agent.py status --json`。
+2. 有效确认后运行：
+
+```text
+node <skill-dir>/scripts/credential-ui/src/profile.ts setup default --confirmed
+```
+
+3. 用户在 localhost 页面只填写：
+   - 子代理模型：必须填写精确模型 ID，仓库不提供默认值。
    - 思考强度：`low`、`medium` 或 `high`。
    - 支持识图：`yes` 或 `no`。
-3. 页面保存后，经包装器运行：
+4. 保存后运行：
 
 ```text
-node <skill-dir>/scripts/credential-ui/src/profile.ts run default -- python3 <skill-dir>/scripts/codex_custom_agent.py setup --model-env --effort-env --vision-env --json
+node <skill-dir>/scripts/credential-ui/src/profile.ts run default -- python3 <skill-dir>/scripts/codex_custom_agent.py setup --model-env --effort-env --vision-env --confirmed --json
 ```
 
-4. `setup`、`repair` 和 `test` 使用桌面应用内置 Codex。若返回 `new_task_required` 或 `restart_required`，完全重启 Codex 并打开新任务。
-5. 验收必须同时确认父 Provider 直连口令 `CUSTOM_AGENT_DIRECT_OK`、原生口令 `NATIVE_CUSTOM_AGENT_OK`，以及子线程数据库中的父 Provider、精确模型、所选思考强度和 `CustomAgent` 角色。
-6. 最终只汇报模型、思考强度、识图能力、父 Provider、角色和备份位置。不要读取或输出认证内容。
+5. `setup` 写入 `CustomAgent.toml` 后执行父 Provider 直连与原生可写子智能体验收。若返回需要重启或新任务，完全退出 Codex 后重新打开。
+6. 最终只汇报模型、思考强度、识图选项、`workspace-write` 沙箱、父 Provider、单文件白名单和验收结果；不要输出认证内容。
 
-入口命令：
+现有 `CustomAgent.toml` 与目标不同且不带本 Skill 标记时，必须在确认范围明确包含完整覆盖后额外传入 `--replace-agent`。
 
-```text
-python3 <skill-dir>/scripts/codex_custom_agent.py <command> --json
-```
+## 可写子智能体工作流
 
-- `status`：只读检查角色、模型目录、父 Provider 和桌面运行时。
-- `setup`：写入所选模型、思考强度和识图能力，并执行验收。
-- `test`：执行父 Provider 直连与原生 `spawn_agent` 验收。
-- `repair`：按已保存设置和当前父模型/Provider 重建配置。
-- `disable`：停用角色，保留模型目录和父认证。
-- `uninstall`：移除本 Skill 管理的角色和模型目录；不删除任何认证。
+主 Agent 负责计划、隔离、验收、整合和回退；`CustomAgent` 只在主 Agent 管理的隔离 worktree 中直接修改代码。
 
-## 识图行为
+1. 每个计划点写明任务 ID、允许写入路径、验收标准和测试。只对 Git 仓库派发可写任务，且不得擅自提交、stash、reset 或清理用户已有修改。
+2. 派发前运行 `scripts/task_worktree.py start` 创建隔离 worktree、基线和任务记录。创建任务分支是该回退流程的必要步骤；其他写项目或上传操作不得自行建立额外分支。
+3. 调用 `spawn_agent(agent_type="CustomAgent", fork_turns="none")`，传入绝对 worktree 路径、允许路径、验收标准和测试命令。不要显式覆盖模型或思考强度。
+4. 子智能体直接修改并测试。主 Agent 检查写入范围并进行功能验收；认证、删除、迁移或安全边界变更仍需针对性代码审核。
+5. 每轮运行 `checkpoint --attempt <n>`。验收失败时把具体证据发回同一个子智能体继续修改。
+6. 通过后运行 `integrate`，在主工作区复测；成功运行 `finalize` 清理 worktree、任务分支、检查点和临时记录，失败运行 `rollback-integrated` 回退整合并清理。
 
-- `supports_vision = true` 时，模型目录写入 `input_modalities = ["text", "image"]`。有图片的委派应把图片作为 `image` 或 `local_image` 输入直接交给 `CustomAgent`；不要先转交主 Agent 做视觉解读。子 Agent 的开发指令也会要求它直接检查收到的图片。
-- `supports_vision = false` 时，模型目录只声明 `input_modalities = ["text"]`。主 Agent 负责查看图片，并把与实现相关的视觉观察作为文本交给子 Agent；子 Agent 不得声称看过图片。
-- 此开关声明用户已确认的模型能力，不会根据模型名称猜测，也不能让本来不支持图片的端点获得视觉能力。
+### 同一任务失败预算
 
-## 主 Agent 工作流
+每个任务分别从 `0` 记录 `attempt_failures`、`parent_redirects` 和 `review_rejections`。任一计数达到 `5` 时，不发起第 6 次调用；运行 `abort` 丢弃隔离修改并清理，然后由主 Agent 自己实现和验证该任务。改写提示词或重复派发同一验收目标不能重置计数；只有开始范围和目标不同的新任务才重新计数，并再次优先使用 `CustomAgent`。
 
-主 Agent 负责计划、派发、验收和最终写入；`CustomAgent` 只读分析并返回候选补丁。
+## Git 分支规则
 
-1. 阅读项目约束，把需求拆成有依赖顺序的计划点，并为每一点写明范围、验收标准和测试。
-2. 调用 `spawn_agent(agent_type="CustomAgent", fork_turns="none")`。一次只派发一个边界明确的计划点，要求完整 unified diff、测试命令和假设。
-3. 不显式指定模型或 reasoning effort；`CustomAgent` 角色配置拥有这些字段。
-4. 不静默回退到 `worker`、`default` 或父模型。失败时报告原始结构化错误，只有用户明确授权后才使用其他 Agent。
-5. 主 Agent 在隔离副本或临时 worktree 中应用候选补丁并测试。失败时把具体文件位置、命令证据、预期行为和修改方向发回同一个子 Agent，要求完整替换补丁。
-6. 候选补丁通过该计划点全部验收后，才应用到真实工作区并复测。
+- 阅读仓库时以远端默认分支为准，不能假设智能体会自动切换到其他分支。
+- 修改和上传仓库时默认直接使用现有主分支，不得为了普通工作自行创建分支。
+- 只有隔离回退流程、用户明确指定或工具强制要求时才创建临时分支，并在完成后清理。
 
-注册角色不等于默认选择角色。用户要求默认使用 `CustomAgent` 时，按 [故障排查文档](references/troubleshooting.md#注册角色不等于默认选择角色) 配置 `AGENTS.md`，然后在新任务中验证数据库元数据。
-
-## 状态处理
-
-- `ready`：静态配置、父 Provider 直连、原生路由和数据库元数据均通过。
-- `configured`：静态配置完整，尚未完成实时验收。
-- `partial`：检查 `checks`；常见原因是旧功能标志、模型目录或 Agent 文件不一致。
-- `configuration_missing`、`model_selection_required`：回到本机设置页补齐三项。
-- `operation_in_progress`：等待当前操作结束，不并发写配置。
-- `conflict`：报告冲突文件和字段，等待用户决定。
-- `native_child_failed`：检查父 Provider 是否允许访问目标子模型。
-
-默认使用当前 `CODEX_HOME`；只有用户明确指定其他 Codex Home 时才传 `--codex-home`。
+详细配置见 [子代理设置](references/configuration.md)，安全边界见 [兼容性](references/compatibility.md)，隔离写入见 [worktree 工作流](references/worktree-workflow.md)，故障处理见 [排障](references/troubleshooting.md)。

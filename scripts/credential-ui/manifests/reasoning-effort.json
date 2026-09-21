@@ -4,7 +4,7 @@
   "label": "思考强度",
   "credential": "codex-custom-subagent/setup/reasoning-effort",
   "ui": {
-    "title": "配置 deepseek 子代理",
+    "title": "配置 CustomAgent",
     "inputType": "select",
     "options": ["low", "medium", "high"],
     "saveLabel": "更新"
