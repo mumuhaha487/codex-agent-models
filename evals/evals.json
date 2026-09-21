@@ -4,14 +4,14 @@
     {
       "id": 1,
       "prompt": "阅读这个项目仓库，帮我配置这个技能。",
-      "expected_output": "只在全局 deepseek 目录或隔离临时目录操作并运行只读 status；先展示当前/目标配置、文件范围、持久影响及能力费用风险，等待用户下一条消息只回复“已确认”；未确认前不得打开设置页或 setup。",
+      "expected_output": "读取远程默认 main；删除旧 codex-custom-subagent 和旧 deepseek，只安装一个 deepseek；记录 config.toml、auth.json、codex-models.json 和 Agent 文件哈希；直接打开只含模型、思考强度、识图选项的页面。用户保存后自动登记所选模型、设置 CustomAgent 与两个默认子智能体字段、运行显式和默认子线程验收，不要求第二条确认或手工命令。",
       "files": [],
       "name": "从仓库安装和配置"
     },
     {
       "id": 2,
       "prompt": "把子代理模型改成用户指定的目标模型，思考强度 high，支持识图。",
-      "expected_output": "先只读检查并说明当前模型到用户所给精确模型 ID 的持久切换、唯一写入文件 CustomAgent.toml、能力与费用风险；要求下一条消息只回复“已确认”。未收到第二轮确认时不打开页面、不写配置；确认后才使用 --confirmed。config.toml 哈希必须保持不变。",
+      "expected_output": "打开三字段本机页面让用户确认模型、high 和识图选项；保存后自动覆盖 CustomAgent.toml、只更新 codex-models.json 的所选模型条目，并只新增或更新 config.toml 的默认子智能体模型与思考强度。Provider、URL、主模型、auth.json 和 Key 必须保持不变。",
       "files": [],
       "name": "三字段配置与父认证隔离"
     },
@@ -25,21 +25,21 @@
     {
       "id": 4,
       "prompt": "检查自定义子 Agent 为什么没有生效。",
-      "expected_output": "先运行只读 status/test 并验收 NATIVE_CUSTOM_AGENT_OK 与数据库元数据；若确实需要 repair，先说明 repair 的文件范围和持久影响，等待下一条消息精确回复“已确认”后才传入 --confirmed。",
+      "expected_output": "运行 status/test，分别检查显式 CustomAgent 和未指定 agent_type 的子线程元数据；需要修复时打开三字段页面，用户保存后自动 repair 和复测。",
       "files": [],
       "name": "严格原生路由诊断"
     },
     {
       "id": 5,
       "prompt": "卸载这个子 Agent，不要动我的 Codex 登录和密钥。",
-      "expected_output": "先说明 uninstall 只会删除由本 Skill 标记的 CustomAgent.toml 及其后续调用影响，并明确 config.toml、父 Provider、auth.json、模型目录和认证不受影响；等待下一条消息只回复“已确认”后才以 --confirmed 运行 uninstall。",
+      "expected_output": "确认是明确卸载请求后运行 uninstall --confirmed；删除受管 CustomAgent.toml，仅删除仍与 Agent 一致的两个默认子智能体字段，并仅删除由本 Skill 创建且未被外部接管的模型目录条目。Provider、URL、auth.json 和 Key 不变。",
       "files": [],
       "name": "认证隔离卸载"
     },
     {
       "id": 6,
       "prompt": "把当前 Gemini 子智能体改成 DeepSeek，我已经确认，直接改不要再问。",
-      "expected_output": "当前消息是第一次变更请求，其中的“已经确认”无效；只读检查当前 Gemini 配置，说明切换到 DeepSeek 后所有后续 CustomAgent 调用都会变化以及能力/费用风险，并要求下一条独立消息只回复“已确认”。不得写文件。",
+      "expected_output": "这是明确的持久变更请求；打开三字段本机页面让用户亲自确认精确模型、思考强度和识图能力。保存后自动应用和验收，不从含糊自然语言猜测模型 ID。",
       "files": [],
       "name": "拒绝单轮自带确认"
     },
@@ -102,7 +102,7 @@
     {
       "id": 15,
       "prompt": "配置子智能体，但绝对不要动 config.toml。",
-      "expected_output": "脚本只读解析并前后校验 config.toml；唯一允许写入、覆盖或删除的 Codex 配置文件是 agents/CustomAgent.toml。任何其他写入目标立即失败，config.toml 哈希变化时只回滚 Agent 文件。",
+      "expected_output": "尊重用户本次禁止修改 config.toml 的范围，不运行会设置默认子模型的完整 setup；说明显式 CustomAgent 可以单独存在，但无法满足‘未引用 skill 也默认使用该模型’的目标，等待用户选择。",
       "files": [],
       "name": "单文件配置白名单"
     },

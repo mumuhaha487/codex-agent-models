@@ -1,4 +1,4 @@
 interface:
-  display_name: "CustomAgent 模型配置"
-  short_description: "仅写 CustomAgent.toml，配置可写子智能体并提供隔离回退"
-  default_prompt: "使用 $deepseek，通过本机页面配置模型、思考强度和识图能力；继承当前 URL 与 Key，只写 CustomAgent.toml，并在隔离 Git worktree 中安全修改代码。"
+  display_name: "DeepSeek 子智能体配置"
+  short_description: "三字段配置 CustomAgent、模型目录和默认子模型"
+  default_prompt: "使用 $deepseek 打开本机页面填写模型、思考强度和识图能力；保存后自动登记模型、配置 CustomAgent 和默认子智能体，并完成原生验收。"

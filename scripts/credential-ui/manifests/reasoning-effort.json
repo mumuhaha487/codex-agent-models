@@ -1,8 +1,8 @@
 {
   "version": 1,
-  "id": "codex-custom-subagent-reasoning-effort",
+  "id": "deepseek-reasoning-effort",
   "label": "思考强度",
-  "credential": "codex-custom-subagent/setup/reasoning-effort",
+  "credential": "deepseek/setup/reasoning-effort",
   "ui": {
     "title": "配置 CustomAgent",
     "inputType": "select",

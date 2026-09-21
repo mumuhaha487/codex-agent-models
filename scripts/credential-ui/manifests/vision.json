@@ -1,8 +1,8 @@
 {
   "version": 1,
-  "id": "codex-custom-subagent-vision",
+  "id": "deepseek-vision",
   "label": "支持识图",
-  "credential": "codex-custom-subagent/setup/vision",
+  "credential": "deepseek/setup/vision",
   "ui": {
     "title": "配置 CustomAgent",
     "inputType": "select",

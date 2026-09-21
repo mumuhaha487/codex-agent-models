@@ -1,8 +1,8 @@
 {
   "version": 1,
-  "id": "codex-custom-subagent-model",
+  "id": "deepseek-model",
   "label": "子代理模型",
-  "credential": "codex-custom-subagent/setup/model",
+  "credential": "deepseek/setup/model",
   "ui": {
     "title": "配置 CustomAgent",
     "placeholder": "输入精确模型 ID",

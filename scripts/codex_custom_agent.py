@@ -4,17 +4,20 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 import os
 import re
 import shutil
 import sqlite3
+import stat
 import subprocess
 import sys
 import tempfile
 import time
 import tomllib
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -40,7 +43,16 @@ REASONING_EFFORTS = {"low", "medium", "high"}
 VISION_VALUES = {"yes", "no"}
 MODEL_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
 MANAGED_MARKER = "# managed-by = deepseek"
+MANAGED_CATALOG_DESCRIPTION = "Custom subagent model managed by deepseek."
 VISION_MARKER = re.compile(r"^# supports-vision = (yes|no)$", re.MULTILINE)
+DEFAULT_SUBAGENT_MODEL_KEY = "default_subagent_model"
+DEFAULT_SUBAGENT_EFFORT_KEY = "default_subagent_reasoning_effort"
+AGENTS_HEADER = re.compile(r"^[ \t]*\[agents\][ \t]*(?:#.*)?(?:\r?\n)?$")
+TABLE_HEADER = re.compile(r"^[ \t]*\[[^\r\n]+\][ \t]*(?:#.*)?(?:\r?\n)?$")
+DEFAULT_SUBAGENT_LINES = {
+    DEFAULT_SUBAGENT_MODEL_KEY: re.compile(r"^[ \t]*default_subagent_model[ \t]*="),
+    DEFAULT_SUBAGENT_EFFORT_KEY: re.compile(r"^[ \t]*default_subagent_reasoning_effort[ \t]*="),
+}
 MAX_STATE_DATABASES = 32
 METADATA_WAIT_SECONDS = 5.0
 DESKTOP_CODEX_CANDIDATES = (
@@ -66,11 +78,17 @@ class Paths:
     home: Path
     config: Path
     agent: Path
+    catalog: Path
 
 
 def resolve_paths(codex_home: str | None) -> Paths:
     home = Path(codex_home or os.environ.get("CODEX_HOME") or Path.home() / ".codex").expanduser().resolve()
-    return Paths(home=home, config=home / "config.toml", agent=home / "agents" / f"{ROLE}.toml")
+    return Paths(
+        home=home,
+        config=home / "config.toml",
+        agent=home / "agents" / f"{ROLE}.toml",
+        catalog=home / "codex-models.json",
+    )
 
 
 def result(status: str, **kwargs: Any) -> dict[str, Any]:
@@ -93,6 +111,33 @@ def sha256_bytes(data: bytes) -> str:
 
 def file_digest(path: Path) -> str | None:
     return sha256_bytes(path.read_bytes()) if path.is_file() else None
+
+
+def read_bytes_with_retry(path: Path, attempts: int = 20, delay_seconds: float = 0.1) -> bytes:
+    last_error: PermissionError | None = None
+    for attempt in range(attempts):
+        try:
+            return path.read_bytes()
+        except PermissionError as exc:
+            last_error = exc
+            if attempt + 1 < attempts:
+                time.sleep(delay_seconds)
+    assert last_error is not None
+    raise last_error
+
+
+@contextmanager
+def inherited_temp_directory(prefix: str):
+    root = Path(tempfile.gettempdir()) / f"{prefix}{os.getpid()}-{time.time_ns()}"
+    root.mkdir()
+    try:
+        yield root
+    finally:
+        def remove_readonly(function, target, _error):
+            os.chmod(target, stat.S_IWRITE)
+            function(target)
+
+        shutil.rmtree(root, onerror=remove_readonly)
 
 
 def find_desktop_codex() -> str:
@@ -141,12 +186,32 @@ def read_config_snapshot(paths: Paths) -> tuple[str, dict[str, Any]]:
     return sha256_bytes(data), parse_toml_text(text, "config.toml")
 
 
+def read_config_source(paths: Paths) -> tuple[bytes, str, str, dict[str, Any]]:
+    if not paths.config.is_file():
+        raise ManagerError("parent_config_missing", f"父配置不存在：{paths.config}")
+    data = paths.config.read_bytes()
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ManagerError("invalid_config", "config.toml 不是 UTF-8。") from exc
+    return data, sha256_bytes(data), text, parse_toml_text(text, "config.toml")
+
+
 def assert_config_unchanged(paths: Paths, expected_digest: str) -> None:
     if file_digest(paths.config) != expected_digest:
         raise ManagerError(
             "protected_config_changed",
             "检测到 config.toml 在操作期间发生变化；已停止，管理器不会修改或恢复该文件。",
             {"path": str(paths.config)},
+        )
+
+
+def assert_catalog_unchanged(paths: Paths, expected_digest: str) -> None:
+    if file_digest(paths.catalog) != expected_digest:
+        raise ManagerError(
+            "protected_model_catalog_changed",
+            "检测到 codex-models.json 在操作期间发生变化；已停止，管理器不会修改或恢复该文件。",
+            {"path": str(paths.catalog)},
         )
 
 
@@ -158,6 +223,141 @@ def configured_parent_model(config: dict[str, Any]) -> str | None:
 def configured_parent_provider(config: dict[str, Any]) -> str | None:
     value = config.get("model_provider")
     return value if isinstance(value, str) and value else None
+
+
+def configured_default_subagent_model(config: dict[str, Any]) -> str | None:
+    agents = config.get("agents")
+    if not isinstance(agents, dict):
+        return None
+    value = agents.get(DEFAULT_SUBAGENT_MODEL_KEY)
+    return value if isinstance(value, str) and value else None
+
+
+def configured_default_subagent_effort(config: dict[str, Any]) -> str | None:
+    agents = config.get("agents")
+    if not isinstance(agents, dict):
+        return None
+    value = agents.get(DEFAULT_SUBAGENT_EFFORT_KEY)
+    return value if isinstance(value, str) and value in REASONING_EFFORTS else None
+
+
+def config_without_managed_subagent_settings(config: dict[str, Any]) -> dict[str, Any]:
+    normalized = copy.deepcopy(config)
+    agents = normalized.get("agents")
+    if isinstance(agents, dict):
+        agents.pop(DEFAULT_SUBAGENT_MODEL_KEY, None)
+        agents.pop(DEFAULT_SUBAGENT_EFFORT_KEY, None)
+        if not agents:
+            normalized.pop("agents", None)
+    return normalized
+
+
+def _replace_agents_setting(lines: list[str], agents_index: int, key: str, value: str, newline: str) -> None:
+    section_end = next(
+        (index for index in range(agents_index + 1, len(lines)) if TABLE_HEADER.fullmatch(lines[index])),
+        len(lines),
+    )
+    key_index = next(
+        (index for index in range(agents_index + 1, section_end) if DEFAULT_SUBAGENT_LINES[key].match(lines[index])),
+        None,
+    )
+    replacement = f"{key} = {toml_string(value)}{newline}"
+    if key_index is None:
+        lines.insert(section_end, replacement)
+        return
+    comment_match = re.search(r"[ \t]+#.*?(?=\r?\n?$)", lines[key_index])
+    comment = comment_match.group(0) if comment_match else ""
+    line_ending = "\r\n" if lines[key_index].endswith("\r\n") else "\n" if lines[key_index].endswith("\n") else ""
+    lines[key_index] = f"{key} = {toml_string(value)}{comment}{line_ending}"
+
+
+def config_with_default_subagent_settings(text: str, model: str, effort: str) -> str:
+    model = validate_model_id(model)
+    effort = validate_reasoning_effort(effort)
+    before = parse_toml_text(text, "config.toml")
+    newline = "\r\n" if "\r\n" in text else "\n"
+    lines = text.splitlines(keepends=True)
+    agents_index = next((index for index, line in enumerate(lines) if AGENTS_HEADER.fullmatch(line)), None)
+
+    if agents_index is None:
+        nested_agents_index = next(
+            (
+                index
+                for index, line in enumerate(lines)
+                if re.match(r"^[ \t]*\[agents\.", line)
+            ),
+            None,
+        )
+        section = [
+            f"[agents]{newline}",
+            f"{DEFAULT_SUBAGENT_MODEL_KEY} = {toml_string(model)}{newline}",
+            f"{DEFAULT_SUBAGENT_EFFORT_KEY} = {toml_string(effort)}{newline}",
+        ]
+        if nested_agents_index is None:
+            if lines and not lines[-1].endswith(("\n", "\r")):
+                lines[-1] += newline
+            if lines and lines[-1].strip():
+                lines.append(newline)
+            lines.extend(section)
+        else:
+            lines[nested_agents_index:nested_agents_index] = section + [newline]
+    else:
+        _replace_agents_setting(lines, agents_index, DEFAULT_SUBAGENT_MODEL_KEY, model, newline)
+        _replace_agents_setting(lines, agents_index, DEFAULT_SUBAGENT_EFFORT_KEY, effort, newline)
+
+    updated = "".join(lines)
+    after = parse_toml_text(updated, "config.toml")
+    if configured_default_subagent_model(after) != model:
+        raise ManagerError("default_subagent_model_write_failed", "默认子智能体模型没有正确写入 config.toml。")
+    if configured_default_subagent_effort(after) != effort:
+        raise ManagerError("default_subagent_effort_write_failed", "默认子智能体思考强度没有正确写入 config.toml。")
+    if config_without_managed_subagent_settings(before) != config_without_managed_subagent_settings(after):
+        raise ManagerError("protected_config_changed", "拒绝修改默认子智能体模型和思考强度之外的 config.toml 字段。")
+    return updated
+
+
+def config_without_managed_subagent_settings_text(text: str, expected_model: str, expected_effort: str) -> str:
+    before = parse_toml_text(text, "config.toml")
+    expected_model = validate_model_id(expected_model)
+    expected_effort = validate_reasoning_effort(expected_effort)
+    current_model = configured_default_subagent_model(before)
+    current_effort = configured_default_subagent_effort(before)
+    remove_keys = {
+        key
+        for key, current, expected in (
+            (DEFAULT_SUBAGENT_MODEL_KEY, current_model, expected_model),
+            (DEFAULT_SUBAGENT_EFFORT_KEY, current_effort, expected_effort),
+        )
+        if current == expected
+    }
+    if not remove_keys:
+        return text
+    lines = text.splitlines(keepends=True)
+    agents_index = next((index for index, line in enumerate(lines) if AGENTS_HEADER.fullmatch(line)), None)
+    if agents_index is None:
+        raise ManagerError("unsupported_agents_layout", "无法安全定位 config.toml 中的 [agents] 表。")
+    section_end = next(
+        (index for index in range(agents_index + 1, len(lines)) if TABLE_HEADER.fullmatch(lines[index])),
+        len(lines),
+    )
+    key_indexes = [
+        index
+        for index in range(agents_index + 1, section_end)
+        if any(DEFAULT_SUBAGENT_LINES[key].match(lines[index]) for key in remove_keys)
+    ]
+    if len(key_indexes) != len(remove_keys):
+        raise ManagerError("unsupported_agents_layout", "无法安全定位 config.toml 中的受管默认子智能体字段。")
+    for index in reversed(key_indexes):
+        del lines[index]
+    updated = "".join(lines)
+    after = parse_toml_text(updated, "config.toml")
+    if DEFAULT_SUBAGENT_MODEL_KEY in remove_keys and configured_default_subagent_model(after) is not None:
+        raise ManagerError("default_subagent_model_remove_failed", "默认子智能体模型删除后验收失败。")
+    if DEFAULT_SUBAGENT_EFFORT_KEY in remove_keys and configured_default_subagent_effort(after) is not None:
+        raise ManagerError("default_subagent_effort_remove_failed", "默认子智能体思考强度删除后验收失败。")
+    if config_without_managed_subagent_settings(before) != config_without_managed_subagent_settings(after):
+        raise ManagerError("protected_config_changed", "停用操作修改了受管默认子智能体字段之外的配置。")
+    return updated
 
 
 def validate_model_id(model: str) -> str:
@@ -177,6 +377,133 @@ def validate_vision(value: str) -> bool:
     if normalized not in VISION_VALUES:
         raise ManagerError("invalid_vision", "识图能力必须是 yes 或 no。")
     return normalized == "yes"
+
+
+def configured_catalog_path(paths: Paths, config: dict[str, Any]) -> Path:
+    value = config.get("model_catalog_json")
+    if not isinstance(value, str) or not value.strip():
+        raise ManagerError("model_catalog_unconfigured", "config.toml 没有配置 model_catalog_json。")
+    expanded = Path(os.path.expandvars(os.path.expanduser(value.strip())))
+    resolved = (paths.home / expanded).resolve() if not expanded.is_absolute() else expanded.resolve()
+    if resolved != paths.catalog.resolve():
+        raise ManagerError(
+            "unsupported_model_catalog_path",
+            "model_catalog_json 必须指向当前 CODEX_HOME 下的 codex-models.json，管理器不会写入其他路径。",
+            {"configured_path": str(resolved), "required_path": str(paths.catalog.resolve())},
+        )
+    return resolved
+
+
+def parse_catalog_bytes(data: bytes, source: str = "codex-models.json") -> dict[str, Any]:
+    try:
+        parsed = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ManagerError("invalid_model_catalog", f"{source} 无法解析：{exc}") from exc
+    if not isinstance(parsed, dict) or not isinstance(parsed.get("models"), list):
+        raise ManagerError("invalid_model_catalog", f"{source} 必须包含 models 数组。")
+    if not all(isinstance(item, dict) for item in parsed["models"]):
+        raise ManagerError("invalid_model_catalog", f"{source} 的 models 数组包含无效条目。")
+    return parsed
+
+
+def read_catalog_source(paths: Paths, config: dict[str, Any]) -> tuple[bytes, str, dict[str, Any]]:
+    target = configured_catalog_path(paths, config)
+    if not target.is_file():
+        raise ManagerError("model_catalog_missing", f"模型目录不存在：{target}")
+    data = target.read_bytes()
+    return data, sha256_bytes(data), parse_catalog_bytes(data)
+
+
+def catalog_without_model(catalog: dict[str, Any], model: str) -> dict[str, Any]:
+    normalized = copy.deepcopy(catalog)
+    normalized["models"] = [item for item in normalized["models"] if item.get("slug") != model]
+    return normalized
+
+
+def catalog_model_entry(catalog: dict[str, Any], model: str) -> dict[str, Any] | None:
+    matches = [item for item in catalog["models"] if item.get("slug") == model]
+    if len(matches) > 1:
+        raise ManagerError("duplicate_model_catalog_entry", f"模型目录中存在多个 {model} 条目。")
+    return matches[0] if matches else None
+
+
+def supported_reasoning_levels() -> list[dict[str, str]]:
+    return [
+        {"effort": "low", "description": "Fast responses with lighter reasoning"},
+        {"effort": "medium", "description": "Balanced reasoning for general coding tasks"},
+        {"effort": "high", "description": "Greater reasoning depth for coding and agent tasks"},
+    ]
+
+
+def catalog_with_model(data: bytes, model: str, effort: str, supports_vision: bool) -> tuple[bytes, bool]:
+    model = validate_model_id(model)
+    effort = validate_reasoning_effort(effort)
+    if not isinstance(supports_vision, bool):
+        raise ManagerError("invalid_vision", "识图能力必须由用户明确选择 yes 或 no。")
+    before = parse_catalog_bytes(data)
+    existing = catalog_model_entry(before, model)
+    created = existing is None
+    if existing is None:
+        template = catalog_model_entry(before, "auto")
+        if template is None:
+            raise ManagerError("model_catalog_template_missing", "模型目录缺少 auto 模板，无法安全创建自定义模型条目。")
+        target = copy.deepcopy(template)
+        target["slug"] = model
+        target["display_name"] = model
+        target["description"] = MANAGED_CATALOG_DESCRIPTION
+    else:
+        target = copy.deepcopy(existing)
+        target.setdefault("display_name", model)
+    target["default_reasoning_level"] = effort
+    target["supported_reasoning_levels"] = supported_reasoning_levels()
+    target["input_modalities"] = ["text", "image"] if supports_vision else ["text"]
+    target["visibility"] = "list"
+    target["supported_in_api"] = True
+
+    after = copy.deepcopy(before)
+    if existing is None:
+        after["models"].append(target)
+    else:
+        index = after["models"].index(existing)
+        after["models"][index] = target
+    if catalog_without_model(before, model) != catalog_without_model(after, model):
+        raise ManagerError("protected_model_catalog_changed", "拒绝修改所选模型条目之外的模型目录内容。")
+    output = json.dumps(after, ensure_ascii=False, indent=2).encode("utf-8")
+    parse_catalog_bytes(output)
+    return output, created
+
+
+def catalog_model_matches(catalog: dict[str, Any], model: str, effort: str, supports_vision: bool) -> bool:
+    entry = catalog_model_entry(catalog, model)
+    if entry is None:
+        return False
+    efforts = {
+        item.get("effort")
+        for item in entry.get("supported_reasoning_levels", [])
+        if isinstance(item, dict)
+    }
+    modalities = entry.get("input_modalities")
+    expected_modalities = ["text", "image"] if supports_vision else ["text"]
+    return (
+        entry.get("default_reasoning_level") == effort
+        and effort in efforts
+        and modalities == expected_modalities
+        and entry.get("supported_in_api") is True
+    )
+
+
+def catalog_without_managed_model(data: bytes, model: str) -> bytes:
+    before = parse_catalog_bytes(data)
+    existing = catalog_model_entry(before, model)
+    if existing is None or existing.get("description") != MANAGED_CATALOG_DESCRIPTION:
+        return data
+    after = copy.deepcopy(before)
+    after["models"] = [item for item in after["models"] if item.get("slug") != model]
+    if catalog_without_model(before, model) != after:
+        raise ManagerError("protected_model_catalog_changed", "停用操作修改了受管模型条目之外的模型目录内容。")
+    output = json.dumps(after, ensure_ascii=False, indent=2).encode("utf-8")
+    parse_catalog_bytes(output)
+    return output
 
 
 def expected_agent_text(model: str, provider: str, effort: str, supports_vision: bool) -> str:
@@ -242,7 +569,17 @@ def configured_supports_vision(paths: Paths) -> bool | None:
 
 def assert_agent_target(paths: Paths, target: Path) -> None:
     if target.resolve() != paths.agent.resolve():
-        raise ManagerError("write_scope_violation", "拒绝写入 CustomAgent.toml 之外的任何 Codex 配置文件。")
+        raise ManagerError("write_scope_violation", "拒绝写入允许清单之外的 Codex 配置文件。")
+
+
+def assert_config_target(paths: Paths, target: Path) -> None:
+    if target.resolve() != paths.config.resolve():
+        raise ManagerError("write_scope_violation", "拒绝写入允许清单之外的 Codex 配置文件。")
+
+
+def assert_catalog_target(paths: Paths, target: Path) -> None:
+    if target.resolve() != paths.catalog.resolve():
+        raise ManagerError("write_scope_violation", "拒绝写入允许清单之外的模型目录文件。")
 
 
 def atomic_write_agent(paths: Paths, data: bytes) -> None:
@@ -265,6 +602,62 @@ def atomic_write_agent(paths: Paths, data: bytes) -> None:
         raise
 
 
+def atomic_write_config(paths: Paths, data: bytes, expected_digest: str) -> None:
+    target = paths.config
+    assert_config_target(paths, target)
+    if file_digest(target) != expected_digest:
+        raise ManagerError(
+            "protected_config_changed",
+            "检测到 config.toml 在操作期间被其他进程修改；已停止且不会覆盖外部变更。",
+            {"path": str(target)},
+        )
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ManagerError("invalid_config", "准备写入的 config.toml 不是 UTF-8。") from exc
+    parse_toml_text(text, "config.toml")
+    fd, temporary = tempfile.mkstemp(prefix=f".{target.name}.", dir=target.parent)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, target.stat().st_mode & 0o777)
+        os.replace(temporary, target)
+    except Exception:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def atomic_write_catalog(paths: Paths, data: bytes, expected_digest: str) -> None:
+    target = paths.catalog
+    assert_catalog_target(paths, target)
+    if file_digest(target) != expected_digest:
+        raise ManagerError(
+            "protected_model_catalog_changed",
+            "检测到 codex-models.json 在操作期间被其他进程修改；已停止且不会覆盖外部变更。",
+            {"path": str(target)},
+        )
+    parse_catalog_bytes(data)
+    fd, temporary = tempfile.mkstemp(prefix=f".{target.name}.", dir=target.parent)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, target.stat().st_mode & 0o777)
+        os.replace(temporary, target)
+    except Exception:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+        raise
+
+
 def delete_agent(paths: Paths) -> None:
     assert_agent_target(paths, paths.agent)
     paths.agent.unlink(missing_ok=True)
@@ -274,16 +667,29 @@ def restore_agent(paths: Paths, previous: bytes | None) -> None:
     delete_agent(paths) if previous is None else atomic_write_agent(paths, previous)
 
 
+def restore_config(paths: Paths, previous: bytes, expected_current_digest: str) -> None:
+    atomic_write_config(paths, previous, expected_current_digest)
+
+
+def restore_catalog(paths: Paths, previous: bytes, expected_current_digest: str) -> None:
+    atomic_write_catalog(paths, previous, expected_current_digest)
+
+
 def install(paths: Paths, _codex_bin: str, model: str, effort: str, vision: bool, replace_agent: bool = False) -> dict[str, Any]:
     model = validate_model_id(model)
     effort = validate_reasoning_effort(effort)
     if not isinstance(vision, bool):
         raise ManagerError("invalid_vision", "识图能力必须由用户明确选择 yes 或 no。")
-    config_digest, config = read_config_snapshot(paths)
+    config_bytes, config_digest, config_text, config = read_config_source(paths)
     provider = configured_parent_provider(config)
     if not provider:
         raise ManagerError("parent_provider_unconfigured", "桌面配置中没有明确的父 model_provider。")
+    catalog_bytes, catalog_digest, catalog = read_catalog_source(paths, config)
     target = expected_agent_text(model, provider, effort, vision).encode("utf-8")
+    target_config = config_with_default_subagent_settings(config_text, model, effort).encode("utf-8")
+    target_config_digest = sha256_bytes(target_config)
+    target_catalog, catalog_created = catalog_with_model(catalog_bytes, model, effort, vision)
+    target_catalog_digest = sha256_bytes(target_catalog)
     previous = paths.agent.read_bytes() if paths.agent.is_file() else None
     previous_managed = previous is not None and MANAGED_MARKER.encode("utf-8") in previous
     if previous is not None and previous != target and not previous_managed and not replace_agent:
@@ -293,12 +699,58 @@ def install(paths: Paths, _codex_bin: str, model: str, effort: str, vision: bool
             {"path": str(paths.agent), "resolution": "确认完整覆盖范围后，以 --confirmed --replace-agent 重试。"},
         )
     changed = previous != target
+    config_changed = config_bytes != target_config
+    catalog_changed = catalog_bytes != target_catalog
+    config_written = False
+    catalog_written = False
+    agent_written = False
     try:
+        if catalog_changed:
+            atomic_write_catalog(paths, target_catalog, catalog_digest)
+            catalog_written = True
+        if config_changed:
+            atomic_write_config(paths, target_config, config_digest)
+            config_written = True
         if changed:
             atomic_write_agent(paths, target)
-        assert_config_unchanged(paths, config_digest)
-    except Exception:
-        restore_agent(paths, previous)
+            agent_written = True
+        current_digest, current_config = read_config_snapshot(paths)
+        if current_digest != target_config_digest or configured_default_subagent_model(current_config) != model:
+            raise ManagerError("default_subagent_model_write_failed", "默认子智能体模型写入后验收失败。")
+        if configured_default_subagent_effort(current_config) != effort:
+            raise ManagerError("default_subagent_effort_write_failed", "默认子智能体思考强度写入后验收失败。")
+        if config_without_managed_subagent_settings(config) != config_without_managed_subagent_settings(current_config):
+            raise ManagerError("protected_config_changed", "config.toml 中出现了允许字段之外的变化。")
+        current_catalog_bytes = paths.catalog.read_bytes()
+        if sha256_bytes(current_catalog_bytes) != target_catalog_digest:
+            raise ManagerError("protected_model_catalog_changed", "模型目录写入后被其他进程修改。")
+        current_catalog = parse_catalog_bytes(current_catalog_bytes)
+        if not catalog_model_matches(current_catalog, model, effort, vision):
+            raise ManagerError("model_catalog_write_failed", "模型目录中的自定义子智能体模型没有正确写入。")
+        if catalog_without_model(catalog, model) != catalog_without_model(current_catalog, model):
+            raise ManagerError("protected_model_catalog_changed", "模型目录中出现了所选模型条目之外的变化。")
+    except Exception as error:
+        rollback_errors: list[str] = []
+        if agent_written:
+            try:
+                if paths.agent.is_file() and paths.agent.read_bytes() == target:
+                    restore_agent(paths, previous)
+                else:
+                    rollback_errors.append("CustomAgent.toml 已被外部修改，未覆盖该外部变化。")
+            except Exception as exc:
+                rollback_errors.append(f"CustomAgent.toml 回滚失败：{exc}")
+        if config_written:
+            try:
+                restore_config(paths, config_bytes, target_config_digest)
+            except Exception as exc:
+                rollback_errors.append(f"config.toml 回滚失败：{exc}")
+        if catalog_written:
+            try:
+                restore_catalog(paths, catalog_bytes, target_catalog_digest)
+            except Exception as exc:
+                rollback_errors.append(f"codex-models.json 回滚失败：{exc}")
+        if rollback_errors:
+            raise ManagerError("rollback_incomplete", "配置失败且自动回滚不完整。", {"errors": rollback_errors}) from error
         raise
     return {
         "skill_name": SKILL_NAME,
@@ -309,9 +761,17 @@ def install(paths: Paths, _codex_bin: str, model: str, effort: str, vision: bool
         "execution_mode": AGENT_EXECUTION_MODE,
         "parent_provider": provider,
         "parent_credentials_untouched": True,
-        "protected_config_unchanged": True,
-        "write_allowlist": [str(paths.agent)],
+        "provider_url_unchanged": True,
+        "default_subagent_model": model,
+        "default_subagent_reasoning_effort": effort,
+        "model_catalog": str(paths.catalog),
+        "model_catalog_registered": True,
+        "protected_config_fields_unchanged": True,
+        "write_allowlist": [str(paths.agent), str(paths.config), str(paths.catalog)],
         "changed": changed,
+        "config_changed": config_changed,
+        "catalog_changed": catalog_changed,
+        "catalog_entry_created": catalog_created,
         "replaced_conflicting_agent": bool(previous is not None and changed and not previous_managed and replace_agent),
     }
 
@@ -320,21 +780,34 @@ def static_status(paths: Paths, codex_bin: str | None = None) -> dict[str, Any]:
     checks: dict[str, Any] = {
         "config_exists": paths.config.is_file(),
         "agent_exists": paths.agent.is_file(),
-        "write_allowlist_exact": [str(paths.agent)],
-        "protected_config_read_only": True,
+        "model_catalog_exists": paths.catalog.is_file(),
+        "write_allowlist_exact": [str(paths.agent), str(paths.config), str(paths.catalog)],
+        "protected_config_fields_only": True,
         "desktop_codex_detected": bool(codex_bin),
     }
     errors: list[str] = []
     provider: str | None = None
+    default_model: str | None = None
+    default_effort: str | None = None
+    config: dict[str, Any] | None = None
     settings: dict[str, Any] = {}
     try:
         _, config = read_config_snapshot(paths)
         provider = configured_parent_provider(config)
+        default_model = configured_default_subagent_model(config)
+        default_effort = configured_default_subagent_effort(config)
+        configured_catalog_path(paths, config)
         checks["config_valid"] = True
         checks["parent_provider_configured"] = bool(provider)
+        checks["default_subagent_model_configured"] = bool(default_model)
+        checks["default_subagent_effort_configured"] = bool(default_effort)
+        checks["model_catalog_configured"] = True
     except ManagerError as exc:
         checks["config_valid"] = False
         checks["parent_provider_configured"] = False
+        checks["default_subagent_model_configured"] = False
+        checks["default_subagent_effort_configured"] = False
+        checks["model_catalog_configured"] = False
         errors.append(str(exc))
     if paths.agent.is_file():
         try:
@@ -365,9 +838,32 @@ def static_status(paths: Paths, codex_bin: str | None = None) -> dict[str, Any]:
                 "provider_inherited": False,
             }
         )
+    checks["default_model_matches_agent"] = bool(default_model) and default_model == settings.get("model")
+    checks["default_effort_matches_agent"] = bool(default_effort) and default_effort == settings.get("reasoning_effort")
+    try:
+        if config is None:
+            raise ManagerError("invalid_config", "config.toml 尚未通过解析。")
+        _, _, catalog = read_catalog_source(paths, config)
+        checks["model_catalog_valid"] = True
+        checks["model_catalog_matches_agent"] = bool(settings) and catalog_model_matches(
+            catalog,
+            settings.get("model"),
+            settings.get("reasoning_effort"),
+            settings.get("supports_vision"),
+        )
+    except (ManagerError, OSError) as exc:
+        checks["model_catalog_valid"] = False
+        checks["model_catalog_matches_agent"] = False
+        errors.append(str(exc))
     required = (
         "config_valid",
         "parent_provider_configured",
+        "default_subagent_model_configured",
+        "default_subagent_effort_configured",
+        "model_catalog_configured",
+        "model_catalog_exists",
+        "model_catalog_valid",
+        "model_catalog_matches_agent",
         "agent_exists",
         "agent_valid",
         "agent_managed",
@@ -376,6 +872,8 @@ def static_status(paths: Paths, codex_bin: str | None = None) -> dict[str, Any]:
         "vision_setting_present",
         "workspace_write",
         "provider_inherited",
+        "default_model_matches_agent",
+        "default_effort_matches_agent",
     )
     ready = all(checks.get(key) is True for key in required)
     status = "configured" if ready else "configuration_missing" if not paths.agent.is_file() else "partial"
@@ -383,13 +881,16 @@ def static_status(paths: Paths, codex_bin: str | None = None) -> dict[str, Any]:
         status,
         skill_name=SKILL_NAME,
         selected_model=settings.get("model"),
+        default_subagent_model=default_model,
+        default_subagent_reasoning_effort=default_effort,
         reasoning_effort=settings.get("reasoning_effort"),
         supports_vision=settings.get("supports_vision"),
         sandbox_mode=settings.get("sandbox_mode"),
         execution_mode=AGENT_EXECUTION_MODE,
         parent_provider=provider,
         parent_credentials_untouched=True,
-        write_allowlist=[str(paths.agent)],
+        model_catalog=str(paths.catalog),
+        write_allowlist=[str(paths.agent), str(paths.config), str(paths.catalog)],
         checks=checks,
         errors=errors,
     )
@@ -524,8 +1025,8 @@ def native_test(paths: Paths, codex_bin: str, model: str, effort: str) -> dict[s
     route = native_route_details(paths, config)
     env = dict(os.environ)
     env["CODEX_HOME"] = str(paths.home)
-    with tempfile.TemporaryDirectory(prefix="codex-custom-agent-write-test-") as directory:
-        repository = Path(directory) / "repo"
+    with inherited_temp_directory("codex-custom-agent-write-test-") as directory:
+        repository = directory / "repo"
         repository.mkdir()
         subprocess.run(["git", "-C", str(repository), "init", "-q"], check=True)
         subprocess.run(["git", "-C", str(repository), "config", "user.name", "Codex Test"], check=True)
@@ -534,7 +1035,7 @@ def native_test(paths: Paths, codex_bin: str, model: str, effort: str) -> dict[s
         subprocess.run(["git", "-C", str(repository), "add", "baseline.txt"], check=True)
         subprocess.run(["git", "-C", str(repository), "commit", "-q", "-m", "baseline"], check=True)
         prompt = (
-            "Use the native spawn_agent tool exactly once with agent_type CustomAgent and fork_turns none. "
+            "Use the native spawn_agent tool exactly once with agent_type CustomAgent and fork_context false. "
             "Tell it that the current directory is its assigned isolated Git worktree. Ask it to create "
             "native-custom-agent-write.txt containing exactly NATIVE_CUSTOM_AGENT_WRITE_OK followed by a newline, "
             "modify no other file, and not commit. Then wait and return only its final response."
@@ -549,7 +1050,7 @@ def native_test(paths: Paths, codex_bin: str, model: str, effort: str) -> dict[s
             timeout=300,
         )
         marker = repository / "native-custom-agent-write.txt"
-        content_ok = marker.is_file() and marker.read_bytes() in {
+        content_ok = marker.is_file() and read_bytes_with_retry(marker) in {
             b"NATIVE_CUSTOM_AGENT_WRITE_OK\n",
             b"NATIVE_CUSTOM_AGENT_WRITE_OK\r\n",
         }
@@ -591,21 +1092,101 @@ def native_test(paths: Paths, codex_bin: str, model: str, effort: str) -> dict[s
     }
 
 
+def default_native_test(paths: Paths, codex_bin: str, model: str, effort: str) -> dict[str, Any]:
+    _, config = read_config_snapshot(paths)
+    parent_model = configured_parent_model(config)
+    provider = configured_parent_provider(config)
+    if not parent_model or not provider:
+        raise ManagerError("parent_route_unconfigured", "桌面配置中没有明确的父模型或父 Provider。")
+    if configured_default_subagent_model(config) != model:
+        raise ManagerError("default_subagent_model_mismatch", "config.toml 的默认子智能体模型与 CustomAgent 不一致。")
+    if configured_default_subagent_effort(config) != effort:
+        raise ManagerError("default_subagent_effort_mismatch", "config.toml 的默认子智能体思考强度与 CustomAgent 不一致。")
+    env = dict(os.environ)
+    env["CODEX_HOME"] = str(paths.home)
+    with inherited_temp_directory("codex-default-subagent-test-") as directory:
+        repository = directory / "repo"
+        repository.mkdir()
+        subprocess.run(["git", "-C", str(repository), "init", "-q"], check=True)
+        prompt = (
+            "This is a configuration diagnostic. Use the native spawn_agent tool exactly once without specifying "
+            "agent_type, model, or reasoning effort. Ask the child to reply exactly DEFAULT_SUBAGENT_MODEL_OK, "
+            "wait for it, and return only its final response. Do not modify any file."
+        )
+        proc = subprocess.run(
+            [
+                codex_bin,
+                "exec",
+                "--json",
+                "-s",
+                "read-only",
+                "-C",
+                str(repository),
+                "-m",
+                parent_model,
+                "-c",
+                "project_doc_max_bytes=0",
+                prompt,
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=env,
+            timeout=300,
+        )
+    if proc.returncode != 0:
+        raise ManagerError("default_native_test_failed", "未指定角色的原生子智能体测试失败。", {"stderr": proc.stderr[-1200:]})
+    child_ids, states = parse_native_events(proc.stdout)
+    child_id = child_ids[0] if len(child_ids) == 1 else None
+    child_state = states.get(child_id) if child_id else None
+    metadata = wait_for_child_metadata(paths, child_id) if child_id else None
+    expected_route = {"model_provider": provider, "model": model, "reasoning_effort": effort}
+    marker_ok = "DEFAULT_SUBAGENT_MODEL_OK" in proc.stdout
+    metadata_ok = bool(metadata) and all(metadata.get(key) == value for key, value in expected_route.items())
+    if child_state and child_state.get("status") not in {None, "completed"}:
+        raise ManagerError("default_native_child_failed", "默认子智能体启动或执行失败。", {"child_state": child_state})
+    if len(child_ids) != 1 or not metadata_ok or not marker_ok:
+        raise ManagerError(
+            "default_native_route_mismatch",
+            "未指定 agent_type 的子智能体没有使用配置的默认模型。",
+            {"child_ids": child_ids, "metadata": metadata, "expected": expected_route, "marker_verified": marker_ok},
+        )
+    return {
+        "default_subagent_native": True,
+        "default_child_id": child_id,
+        "default_child_role": metadata.get("agent_role") if metadata else None,
+        "default_child_model": model,
+        "default_child_reasoning_effort": effort,
+        "default_child_provider": provider,
+    }
+
+
 def run_tests(paths: Paths, codex_bin: str) -> dict[str, Any]:
-    config_digest, _ = read_config_snapshot(paths)
+    config_digest, initial_config = read_config_snapshot(paths)
+    _, catalog_digest, initial_catalog = read_catalog_source(paths, initial_config)
     status = static_status(paths, codex_bin)
     if status["status"] != "configured":
         raise ManagerError("not_configured", "静态配置尚未完整，不能运行实时测试。", status)
     direct = direct_test(paths, codex_bin, status["selected_model"], status["reasoning_effort"])
     native = native_test(paths, codex_bin, status["selected_model"], status["reasoning_effort"])
+    default_native = default_native_test(paths, codex_bin, status["selected_model"], status["reasoning_effort"])
     assert_config_unchanged(paths, config_digest)
+    assert_catalog_unchanged(paths, catalog_digest)
+    _, final_config = read_config_snapshot(paths)
+    _, _, final_catalog = read_catalog_source(paths, final_config)
+    if initial_config != final_config:
+        raise ManagerError("protected_config_changed", "实时验收期间 config.toml 的配置语义发生变化。")
+    if initial_catalog != final_catalog:
+        raise ManagerError("protected_model_catalog_changed", "实时验收期间 codex-models.json 的配置语义发生变化。")
     return result(
         "ready",
         **direct,
         **native,
+        **default_native,
         supports_vision=status["supports_vision"],
-        protected_config_unchanged=True,
-        write_allowlist=[str(paths.agent)],
+        protected_config_fields_unchanged=True,
+        write_allowlist=[str(paths.agent), str(paths.config), str(paths.catalog)],
         new_task_required=True,
         restart_required=True,
     )
@@ -649,37 +1230,127 @@ def setup(
             message="首次配置必须由用户明确填写模型、思考强度和是否支持识图；仓库不提供默认值。",
             missing=missing,
         )
+    previous_config = paths.config.read_bytes()
+    previous_catalog = paths.catalog.read_bytes()
     previous = paths.agent.read_bytes() if paths.agent.is_file() else None
     installed = install(paths, codex_bin, model, effort, vision, replace_agent=replace_agent)
+    installed_config_digest = file_digest(paths.config)
+    installed_catalog_digest = file_digest(paths.catalog)
+    installed_agent_digest = file_digest(paths.agent)
     if skip_live_test:
         return result("configured", **installed, new_task_required=True, restart_required=True)
     try:
         tested = run_tests(paths, codex_bin)
-    except Exception:
-        restore_agent(paths, previous)
+    except Exception as error:
+        rollback_errors: list[str] = []
+        try:
+            if file_digest(paths.agent) == installed_agent_digest:
+                restore_agent(paths, previous)
+            else:
+                rollback_errors.append("CustomAgent.toml 已被外部修改，未覆盖该外部变化。")
+        except Exception as exc:
+            rollback_errors.append(f"CustomAgent.toml 回滚失败：{exc}")
+        try:
+            if installed_config_digest is None:
+                rollback_errors.append("无法确定已安装 config.toml 的摘要，未自动覆盖。")
+            else:
+                restore_config(paths, previous_config, installed_config_digest)
+        except Exception as exc:
+            rollback_errors.append(f"config.toml 回滚失败：{exc}")
+        try:
+            if installed_catalog_digest is None:
+                rollback_errors.append("无法确定已安装 codex-models.json 的摘要，未自动覆盖。")
+            else:
+                restore_catalog(paths, previous_catalog, installed_catalog_digest)
+        except Exception as exc:
+            rollback_errors.append(f"codex-models.json 回滚失败：{exc}")
+        if rollback_errors:
+            raise ManagerError(
+                "rollback_incomplete",
+                "实时验收失败且自动回滚不完整。",
+                {
+                    "cause": error.code if isinstance(error, ManagerError) else type(error).__name__,
+                    "cause_message": str(error),
+                    "errors": rollback_errors,
+                },
+            ) from error
         raise
     return {**tested, **installed}
 
 
 def disable(paths: Paths) -> dict[str, Any]:
     if not paths.agent.is_file():
-        return result("disabled", changed=False, write_allowlist=[str(paths.agent)], protected_config_unchanged=True)
-    if read_agent_settings(paths).get("managed") is not True:
+        return result(
+            "disabled",
+            changed=False,
+            config_changed=False,
+            catalog_changed=False,
+            write_allowlist=[str(paths.agent), str(paths.config), str(paths.catalog)],
+        )
+    settings = read_agent_settings(paths)
+    if settings.get("managed") is not True:
         raise ManagerError("not_managed", "CustomAgent.toml 不是本 Skill 生成的文件，拒绝删除。")
-    config_digest, _ = read_config_snapshot(paths)
+    model = settings.get("model")
+    effort = settings.get("reasoning_effort")
+    if not isinstance(model, str) or effort not in REASONING_EFFORTS:
+        raise ManagerError("invalid_agent", "CustomAgent.toml 没有有效模型或思考强度，拒绝自动停用。")
+    config_bytes, config_digest, config_text, config = read_config_source(paths)
+    catalog_bytes, catalog_digest, _ = read_catalog_source(paths, config)
+    target_config = config_without_managed_subagent_settings_text(config_text, model, effort).encode("utf-8")
+    target_catalog = catalog_without_managed_model(catalog_bytes, model)
+    target_config_digest = sha256_bytes(target_config)
+    target_catalog_digest = sha256_bytes(target_catalog)
     previous = paths.agent.read_bytes()
+    config_changed = target_config != config_bytes
+    catalog_changed = target_catalog != catalog_bytes
     try:
+        if catalog_changed:
+            atomic_write_catalog(paths, target_catalog, catalog_digest)
+        if config_changed:
+            atomic_write_config(paths, target_config, config_digest)
         delete_agent(paths)
-        assert_config_unchanged(paths, config_digest)
-    except Exception:
-        restore_agent(paths, previous)
+        if file_digest(paths.config) != target_config_digest:
+            raise ManagerError("protected_config_changed", "停用期间 config.toml 被其他进程修改。")
+        if file_digest(paths.catalog) != target_catalog_digest:
+            raise ManagerError("protected_model_catalog_changed", "停用期间 codex-models.json 被其他进程修改。")
+    except Exception as error:
+        rollback_errors: list[str] = []
+        try:
+            if not paths.agent.exists():
+                restore_agent(paths, previous)
+        except Exception as exc:
+            rollback_errors.append(f"CustomAgent.toml 回滚失败：{exc}")
+        if config_changed:
+            try:
+                restore_config(paths, config_bytes, target_config_digest)
+            except Exception as exc:
+                rollback_errors.append(f"config.toml 回滚失败：{exc}")
+        if catalog_changed:
+            try:
+                restore_catalog(paths, catalog_bytes, target_catalog_digest)
+            except Exception as exc:
+                rollback_errors.append(f"codex-models.json 回滚失败：{exc}")
+        if rollback_errors:
+            raise ManagerError("rollback_incomplete", "停用失败且自动回滚不完整。", {"errors": rollback_errors}) from error
         raise
-    return result("disabled", changed=True, write_allowlist=[str(paths.agent)], protected_config_unchanged=True)
+    return result(
+        "disabled",
+        changed=True,
+        config_changed=config_changed,
+        catalog_changed=catalog_changed,
+        parent_credentials_untouched=True,
+        protected_config_fields_unchanged=True,
+        write_allowlist=[str(paths.agent), str(paths.config), str(paths.catalog)],
+    )
 
 
 def uninstall(paths: Paths) -> dict[str, Any]:
     disabled = disable(paths)
-    return result("uninstalled", disabled=disabled, write_allowlist=[str(paths.agent)], protected_config_unchanged=True)
+    return result(
+        "uninstalled",
+        disabled=disabled,
+        write_allowlist=[str(paths.agent), str(paths.config), str(paths.catalog)],
+    )
 
 
 def main() -> int:
@@ -707,8 +1378,8 @@ def main() -> int:
         if args.command in {"setup", "repair", "disable", "uninstall"} and not args.confirmed:
             raise ManagerError(
                 "confirmation_required",
-                "拒绝执行持久化子智能体配置变更。必须先展示当前配置、目标配置、影响和唯一写入文件，"
-                "并在后续独立用户消息中收到精确回复“已确认”；确认后重试并传入 --confirmed。",
+                "拒绝执行持久化子智能体配置变更。只有用户明确要求配置，或亲自在本机设置页保存模型选项后，"
+                "才能传入 --confirmed。",
             )
         codex_bin: str | None = None
         if args.command == "test" or (args.command in {"setup", "repair"} and not args.skip_live_test):

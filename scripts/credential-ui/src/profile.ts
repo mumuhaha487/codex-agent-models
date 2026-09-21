@@ -9,6 +9,7 @@ import { startServer } from './server.ts';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 type Binding = { manifest: string; env: string };
+type Completion = { status?: string };
 export async function loadProfile(name: string, directory = root): Promise<Binding[]> {
   let value: unknown;
   try { value = JSON.parse(await readFile(path.join(directory, 'manifests/profiles.json'), 'utf8')); }
@@ -49,14 +50,48 @@ export async function prepareProfile(bindings: Binding[], command: string[], env
   if (!missing.length) return { command: command[0], args: command.slice(1), env: { ...environment } };
   return prepareCommand([...bindingArgs(missing), '--', ...command], read, environment);
 }
+async function runPreparedProfile(bindings: Binding[], command: string[]) {
+  const plan = await prepareProfile(bindings, command);
+  const child = spawn(plan.command, plan.args, { env: plan.env, stdio: 'inherit', shell: false });
+  for (const b of bindings) delete plan.env[b.env];
+  const code = await new Promise<number>((resolve, reject) => {
+    child.once('error', () => reject(new PublicError('业务程序启动失败。')));
+    child.once('exit', value => resolve(value ?? 1));
+  });
+  if (code !== 0) throw new PublicError('子智能体配置或验收失败。');
+}
+export async function openProfileAndApply(
+  bindings: Binding[],
+  command: string[],
+  start = startServer,
+  run = runPreparedProfile,
+) {
+  const manifests = await Promise.all(bindings.map(b => loadManifest(b.manifest)));
+  let complete!: (value: Completion) => void;
+  const completion = new Promise<Completion>(resolve => { complete = resolve; });
+  const app = await start({ manifests, onComplete: result => {
+    process.stdout.write(JSON.stringify(result) + '\n');
+    const value = result as Completion;
+    if (value.status !== 'partial') complete(value);
+  } });
+  process.stdout.write(`本机配置页面（由用户亲自填写，30 分钟内有效）：\n${app.url}\n`);
+  const close = () => app.close();
+  process.once('SIGINT', close); process.once('SIGTERM', close);
+  const outcome = await completion.finally(() => {
+    process.removeListener('SIGINT', close); process.removeListener('SIGTERM', close); app.close();
+  });
+  if (outcome.status !== 'saved') throw new PublicError('本机配置页面未保存，未修改 Codex 配置。');
+  await run(bindings, command);
+}
 async function main() {
   const [action, name, ...args] = process.argv.slice(2);
-  if (!['status', 'setup', 'run'].includes(action) || !name
+  if (!['status', 'setup', 'run', 'apply'].includes(action) || !name
     || (action === 'status' && args.length)
-    || (action === 'run' && (args[0] !== '--' || args.length < 2)))
-    throw new PublicError('用法：node src/profile.ts status 配置名；node src/profile.ts setup 配置名 --confirmed；node src/profile.ts run 配置名 -- 程序 参数');
+    || (action === 'run' && (args[0] !== '--' || args.length < 2))
+    || (action === 'apply' && (args[0] !== '--confirmed' || args[1] !== '--' || args.length < 4)))
+    throw new PublicError('用法：node src/profile.ts status 配置名；node src/profile.ts setup 配置名 --confirmed；node src/profile.ts run 配置名 -- 程序 参数；node src/profile.ts apply 配置名 --confirmed -- 程序 参数');
   if (action === 'setup' && (args.length !== 1 || args[0] !== '--confirmed'))
-    throw new PublicError('拒绝打开持久化子智能体设置页：必须先说明变更影响，并在后续独立用户消息中收到精确回复“已确认”，然后传入 --confirmed。');
+    throw new PublicError('拒绝打开持久化子智能体设置页：只有用户明确要求配置时才能传入 --confirmed。');
   const bindings = await loadProfile(name);
   if (action === 'status') {
     const status = await profileStatus(bindings);
@@ -67,13 +102,8 @@ async function main() {
     const app = await startServer({ manifests, onComplete: result => process.stdout.write(JSON.stringify(result) + '\n') });
     process.stdout.write(`本机配置页面（由用户亲自填写，30 分钟内有效）：\n${app.url}\n`);
     process.once('SIGINT', app.close); process.once('SIGTERM', app.close);
-  } else {
-    const plan = await prepareProfile(bindings, args.slice(1));
-    const child = spawn(plan.command, plan.args, { env: plan.env, stdio: 'inherit', shell: false });
-    for (const b of bindings) delete plan.env[b.env];
-    child.once('error', () => { process.stderr.write('业务程序启动失败。\n'); process.exitCode = 1; });
-    child.once('exit', code => { process.exitCode = code ?? 1; });
-  }
+  } else if (action === 'run') await runPreparedProfile(bindings, args.slice(1));
+  else await openProfileAndApply(bindings, args.slice(2));
 }
 if (process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url)
   main().catch(error => {

@@ -1,23 +1,23 @@
 # Repository Instructions
 
-当用户要求“阅读这个项目仓库，帮我配置这个技能”或表达同等意图时：
+当用户要求“阅读这个项目仓库，帮我配置这个技能”、发送“阅读 https://github.com/mumuhaha487/codex-agent-models 配置skill”或表达同等意图时，完整执行以下流程，不要求用户再发送第二条确认消息：
 
-1. 以远端默认分支 `main` 的内容为准。不得假设会自动切换到其他分支；除非用户明确要求、隔离回退确有必要或工具强制要求，不得自行创建分支。
-2. 阅读根目录 `SKILL.md`、`references/configuration.md`、`references/compatibility.md`、`references/worktree-workflow.md` 和 `references/troubleshooting.md`。
-3. 安装和排障不得修改用户当前业务项目。将仓库安装到当前 `CODEX_HOME/skills/deepseek`，复制时排除 `.git`、`node_modules`、`__pycache__` 和 `*.pyc`，不得覆盖其他 Skill。
-4. 在安装目录运行 `npm --prefix <skill-dir>/scripts/credential-ui ci --ignore-scripts`。
-5. 运行 `python3 <skill-dir>/scripts/codex_custom_agent.py status --json`。第一次收到创建或变更请求时只做只读检查，并说明当前值、目标值、唯一写入文件、持久影响及能力/费用风险。
-6. 必须等待用户在下一条独立消息中只回复 `已确认`。目标或范围变化后重新确认。
-7. 确认后运行 `node <skill-dir>/scripts/credential-ui/src/profile.ts setup default --confirmed`。页面只允许填写模型、思考强度和是否支持识图。
-8. 保存后运行：
+1. 以远端默认分支 `main` 为准。普通修改、安装或上传不得创建新分支。
+2. 阅读根目录 `SKILL.md` 及 `references` 下的配置、兼容性、worktree 和排障说明。
+3. 配置前记录 `$CODEX_HOME/config.toml`、`$CODEX_HOME/auth.json`、`$CODEX_HOME/codex-models.json` 和 `$CODEX_HOME/agents/CustomAgent.toml`（若存在）的 SHA-256。不得输出认证内容或 URL。
+4. 删除旧的 `$CODEX_HOME/skills/codex-custom-subagent` 和 `$CODEX_HOME/skills/deepseek` 后，只把本仓库安装为 `$CODEX_HOME/skills/deepseek`。复制时排除 `.git`、`node_modules`、`__pycache__` 和 `*.pyc`。
+5. 在安装目录运行 `npm --prefix <skill-dir>/scripts/credential-ui ci --ignore-scripts`，再运行管理脚本的 `status --json`。
+6. 运行下面的单一入口，并把输出的 localhost 页面打开给用户。用户只填写模型、思考强度和是否支持识图；保存页面即确认应用，不再要求聊天中回复“已确认”。
 
 ```text
-node <skill-dir>/scripts/credential-ui/src/profile.ts run default -- <python3> <skill-dir>/scripts/codex_custom_agent.py setup --model-env --effort-env --vision-env --confirmed --json
+node <skill-dir>/scripts/credential-ui/src/profile.ts apply default --confirmed -- <python3> <skill-dir>/scripts/codex_custom_agent.py setup --model-env --effort-env --vision-env --confirmed --replace-agent --json
 ```
 
-9. 唯一允许写入、覆盖或删除的 Codex 配置文件是 `$CODEX_HOME/agents/CustomAgent.toml`。`config.toml` 只能读取父 Provider 和进行前后哈希校验；不得修改、恢复、格式化或清理。不得读写 `auth.json`、URL、API Key、模型目录、状态清单、角色注册或功能标志。
-10. 检查模型、思考强度、识图标记、`workspace-write` 沙箱、父 Provider、单文件白名单、原生路由、数据库元数据和临时 Git 仓库写入结果。
-11. 可写任务必须使用 `scripts/task_worktree.py start` 创建隔离 worktree。每轮 `checkpoint`；通过后 `integrate` 并复测，再 `finalize`；失败用 `rollback-integrated` 或 `abort`。
-12. 任一任务级失败计数达到 `5` 时，不发起第 6 次子智能体调用，先丢弃隔离修改并清理，再由主 Agent 直接完成。只有真正的新任务才重置计数。
+7. 等待命令完成。它必须自动写入、测试并返回状态，不能让用户再复制命令、粘贴配置或重复提供模型信息。
+8. 写入清单只有 `$CODEX_HOME/agents/CustomAgent.toml`、`$CODEX_HOME/codex-models.json` 的页面所选模型条目，以及 `$CODEX_HOME/config.toml` 的 `[agents].default_subagent_model` 和 `[agents].default_subagent_reasoning_effort`。
+9. `config.toml` 的主模型、Provider、API URL、`model_catalog_json` 路径及所有其他字段必须保持不变；`codex-models.json` 的其他模型条目必须保持不变；不得写入或删除 `auth.json`，API Key 必须保持不变。完成后复核配置语义和认证文件哈希。
+10. 验收必须覆盖父 Provider 直连、显式 `spawn_agent(agent_type="CustomAgent", fork_context=false)` 可写子线程，以及未指定 `agent_type` 时实际使用页面选择的默认模型和思考强度。
+11. 若结果要求重启或新任务，提示用户完全退出 Codex 后重新打开。
+12. 可写任务使用 `scripts/task_worktree.py` 管理隔离、检查点、整合、回退和清理。任一任务级失败计数达到 `5` 时，不发起第 6 次子智能体调用，由主 Agent 接管。
 
-任何时候都不得把认证内容写入仓库、命令参数、日志或最终回复。
+任何时候都不得把认证内容、完整 URL 或用户密钥写入仓库、命令参数、日志或最终回复。

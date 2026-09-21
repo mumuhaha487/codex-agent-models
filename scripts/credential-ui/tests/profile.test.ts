@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, writeFile, rm, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { loadProfile, prepareProfile, profileStatus } from '../src/profile.ts';
+import { loadProfile, openProfileAndApply, prepareProfile, profileStatus } from '../src/profile.ts';
 import { loadManifest, type CredentialBackend } from '../src/config.ts';
 import { startServer } from '../src/server.ts';
 
@@ -64,4 +64,26 @@ test('配置拒绝跨目录声明、危险变量与未知业务', async t => {
     await assert.rejects(loadProfile('default', dir));
   }
   await assert.rejects(loadProfile('unknown', dir));
+});
+
+test('apply 在页面最终保存后自动运行，部分失败时继续等待重试', async () => {
+  const bindings = await loadProfile('default');
+  let closed = false;
+  let executed = false;
+  await openProfileAndApply(
+    bindings,
+    ['business-program', '--verify'],
+    async options => {
+      queueMicrotask(() => options.onComplete?.({ status: 'partial' }));
+      queueMicrotask(() => options.onComplete?.({ status: 'saved' }));
+      return { origin: 'http://127.0.0.1:1', url: 'http://127.0.0.1:1/#test', bootstrap: 'test', close: () => { closed = true; } };
+    },
+    async (receivedBindings, command) => {
+      assert.equal(receivedBindings, bindings);
+      assert.deepEqual(command, ['business-program', '--verify']);
+      executed = true;
+    },
+  );
+  assert.equal(closed, true);
+  assert.equal(executed, true);
 });
