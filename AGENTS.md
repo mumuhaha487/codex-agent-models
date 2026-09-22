@@ -18,6 +18,6 @@ node <skill-dir>/scripts/credential-ui/src/profile.ts apply default --confirmed 
 9. `config.toml` 的主模型、Provider、API URL、`model_catalog_json` 路径及所有其他字段必须保持不变；`codex-models.json` 的其他模型条目必须保持不变；不得写入或删除 `auth.json`，API Key 必须保持不变。完成后复核配置语义和认证文件哈希。
 10. 验收必须覆盖父 Provider 直连、显式 `spawn_agent(agent_type="CustomAgent", fork_context=false)` 可写子线程，以及未指定 `agent_type` 时实际使用页面选择的默认模型和思考强度。
 11. 若结果要求重启或新任务，提示用户完全退出 Codex 后重新打开。
-12. 可写任务使用 `scripts/task_worktree.py` 管理隔离、检查点、整合、回退和清理。任一任务级失败计数达到 `5` 时，不发起第 6 次子智能体调用，由主 Agent 接管。
+12. 可写任务使用 `scripts/task_worktree.py` 管理隔离、检查点、整合、回退和清理。主 Agent 只负责完整任务合同、协调、阻碍处理与集成，具体实现和测试由子智能体完成；同一任务优先复用原子智能体，独立审查使用新子智能体。禁止连续轮询和重复执行子智能体已成功运行的检查，等待按 `1 -> 2 -> 4 -> 8 -> 16` 分钟退避后维持 16 分钟。任一任务级失败计数达到 `5` 时，恢复基线并重新拆分或改派，不发起第 6 次相同尝试，也不由主 Agent 接手实现。
 
 任何时候都不得把认证内容、完整 URL 或用户密钥写入仓库、命令参数、日志或最终回复。
