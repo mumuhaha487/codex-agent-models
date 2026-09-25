@@ -4,7 +4,7 @@
 
 - macOS、Windows、Python 3.11+，Codex 桌面应用至少启动过一次。
 - 模型 ID 长度不超过 128，只含字母、数字、点、下划线、冒号、斜杠或连字符。
-- 思考强度只允许 `low`、`medium`、`high`。
+- 思考强度只允许 `none`、`low`、`medium`、`high`。
 - 识图选项只允许 `yes` 或 `no`。
 - 当前父 Provider 必须能通过现有认证访问目标模型，并支持 Codex 所需的 Responses 工具调用。
 
@@ -32,9 +32,9 @@ codex-models.json 中除页面所选模型条目外的任何条目
 
 ## Agent 行为
 
-`CustomAgent.toml` 包含目标模型、父 Provider、`model_reasoning_effort`、`sandbox_mode = "workspace-write"`、识图标记和隔离工作指令。
+`CustomAgent.toml` 包含目标模型、父 Provider、`model_reasoning_effort`（`none`、`low`、`medium` 或 `high`）、`sandbox_mode = "workspace-write"`、识图标记和隔离工作指令。
 
-`agents.default_subagent_model` 与 `agents.default_subagent_reasoning_effort` 使未指定角色、模型或思考强度的普通子智能体使用同一设置。显式 `CustomAgent` 仍从 Agent 文件读取 Provider、思考强度、沙箱和工作指令。
+`agents.default_subagent_model` 与 `agents.default_subagent_reasoning_effort` 使未指定角色、模型或思考强度的普通子智能体使用同一设置（包括 `none`，不会被强制转为 `high`）。显式 `CustomAgent` 仍从 Agent 文件读取 Provider、思考强度、沙箱和工作指令。
 
 识图选项只修改所选模型条目的 `input_modalities`。`yes` 表示用户确认模型支持图片；`no` 表示只使用文本。
 

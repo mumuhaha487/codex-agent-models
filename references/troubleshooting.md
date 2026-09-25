@@ -4,7 +4,7 @@
 
 ## URL 与 Key
 
-原生子 Agent 继承父任务的 Provider 路由。本 Skill 只登记页面所选模型、设置思考强度与识图元数据，并配置默认子智能体，不修改 URL、Key、父 Provider 或认证。父凭据必须同时允许访问父模型和子模型。
+原生子 Agent 继承父任务的 Provider 路由。本 Skill 只登记页面所选模型、设置思考强度（支持 `none`、`low`、`medium`、`high`）与识图元数据，并配置默认子智能体，不修改 URL、Key、父 Provider 或认证。父凭据必须同时允许访问父模型和子模型。
 
 配置前后比较 `auth.json` 哈希；比较时不得输出内容。`config.toml` 去除两个受管 `agents` 字段后必须与修改前相同，`codex-models.json` 去除页面所选模型条目后也必须与修改前相同。
 
@@ -18,21 +18,29 @@
 ## 显式 CustomAgent 无法创建
 
 1. 确认只保留 `$CODEX_HOME/skills/deepseek`，旧的 `codex-custom-subagent` 已删除。
-2. 检查 `$CODEX_HOME/agents/CustomAgent.toml` 能被 TOML 解析，模型、父 Provider、思考强度和沙箱字段完整。
+2. 检查 `$CODEX_HOME/agents/CustomAgent.toml` 能被 TOML 解析，模型、父 Provider、思考强度（`none`、`low`、`medium` 或 `high`）和沙箱字段完整。
 3. 检查 `$CODEX_HOME/codex-models.json` 存在该模型，且思考强度和输入模态与页面选择一致。
 4. 运行 `test --json`，检查显式角色的线程元数据和临时 Git 仓库写入结果。显式调用必须使用 `fork_context=false`。
 5. 若工具 schema 不认识 `CustomAgent`，完全重启 Codex 并打开新任务。
+
+## 编码、独立审查与界面验证
+
+1. 编码任务由 `CustomAgent` 在隔离 worktree 中独立完成并运行测试。
+2. 独立审查必须由另一个 `CustomAgent` 在独立上下文只读执行，不能由实现者自审，也不能由主模型代替。
+3. 审查发现的问题必须交回原实现子智能体修订，并由原审查子智能体复核。
+4. 涉及界面修改的任务必须提供桌面端和移动端真实视口的完整验收证据，不能仅凭单元测试断言界面正常。
+5. 主模型信任子智能体交付的测试证据，不重复执行已通过的相同命令。
 
 ## 识图没有生效
 
 1. 运行 `status --json`，确认 `supports_vision = true`。
 2. 确认上游模型和父 Provider 实际支持图片。本 Skill 不根据模型名猜测能力。
 3. 委派时把图片作为 `image` 或 `local_image` 输入传给 `CustomAgent`。
-4. 完全重启 Codex并创建新任务。
+4. 完全重启 Codex 并创建新任务。
 
 ## 成功证据
 
-1. `CustomAgent.toml` 的模型、Provider、思考强度、识图选项和 `workspace-write` 正确。
+1. `CustomAgent.toml` 的模型、Provider、思考强度（支持 `none`）、识图选项和 `workspace-write` 正确。
 2. `codex-models.json` 已登记页面模型、所选思考强度和输入模态，其他模型条目不变。
 3. `config.toml` 的默认子智能体模型与思考强度和 Agent 一致，其他配置语义不变。
 4. `auth.json` 和 API Key 未变，Provider URL 未变。

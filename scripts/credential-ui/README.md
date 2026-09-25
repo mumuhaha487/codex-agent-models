@@ -1,6 +1,6 @@
 # 本机模型设置页
 
-默认 profile 只包含模型、思考强度和识图能力，不包含 URL 或 API Key。
+默认 profile 只包含模型、思考强度（`none`、`low`、`medium`、`high`）和识图能力，不包含 URL 或 API Key。
 
 完整自动入口：
 

@@ -61,6 +61,13 @@ class ManagerTestCase(unittest.TestCase):
 
 
 class AgentTextTests(ManagerTestCase):
+    def test_writable_agent_with_none_reasoning_effort(self) -> None:
+        text = MANAGER.expected_agent_text("child-model", "parent-provider", "none", False)
+        self.assertIn('model = "child-model"', text)
+        self.assertIn('model_provider = "parent-provider"', text)
+        self.assertIn('model_reasoning_effort = "none"', text)
+        self.assertIn('sandbox_mode = "workspace-write"', text)
+
     def test_writable_agent_inherits_provider_effort_and_vision(self) -> None:
         text = MANAGER.expected_agent_text("child-model", "parent-provider", "high", True)
         self.assertIn('model = "child-model"', text)
@@ -77,6 +84,23 @@ class AgentTextTests(ManagerTestCase):
 
 
 class WriteScopeTests(ManagerTestCase):
+    def test_install_with_none_reasoning_effort(self) -> None:
+        outcome = MANAGER.install(self.paths, "", "child-model", "none", False)
+        self.assertTrue(outcome["protected_config_fields_unchanged"])
+        self.assertTrue(self.paths.agent.is_file())
+        after_config = MANAGER.parse_toml_text(self.paths.config.read_text(encoding="utf-8"))
+        self.assertEqual(after_config["agents"]["default_subagent_model"], "child-model")
+        self.assertEqual(after_config["agents"]["default_subagent_reasoning_effort"], "none")
+        agent_settings = MANAGER.read_agent_settings(self.paths)
+        self.assertEqual(agent_settings["reasoning_effort"], "none")
+        catalog_entry = MANAGER.catalog_model_entry(
+            json.loads(self.paths.catalog.read_text(encoding="utf-8")), "child-model"
+        )
+        self.assertIsNotNone(catalog_entry)
+        self.assertEqual(catalog_entry["default_reasoning_level"], "none")
+        efforts = {item["effort"] for item in catalog_entry["supported_reasoning_levels"]}
+        self.assertIn("none", efforts)
+
     def snapshot_unmanaged_files(self) -> dict[str, str]:
         return {
             str(path.relative_to(self.paths.home)): MANAGER.sha256_bytes(path.read_bytes())
@@ -179,6 +203,28 @@ class WriteScopeTests(ManagerTestCase):
 
 
 class ConfigEditingTests(ManagerTestCase):
+    def test_reasoning_effort_validation(self) -> None:
+        for valid in ("none", "low", "medium", "high"):
+            self.assertEqual(MANAGER.validate_reasoning_effort(valid), valid)
+        for invalid in ("ultra", "", "None", "off", "max"):
+            with self.assertRaises(MANAGER.ManagerError) as caught:
+                MANAGER.validate_reasoning_effort(invalid)
+            self.assertEqual(caught.exception.code, "invalid_reasoning_effort")
+
+    def test_config_with_none_reasoning_effort(self) -> None:
+        initial = 'model = "parent"\n'
+        updated = MANAGER.config_with_default_subagent_settings(initial, "child", "none")
+        self.assertIn('default_subagent_reasoning_effort = "none"', updated)
+        parsed = MANAGER.parse_toml_text(updated)
+        self.assertEqual(parsed["agents"]["default_subagent_model"], "child")
+        self.assertEqual(parsed["agents"]["default_subagent_reasoning_effort"], "none")
+        cleaned_text = MANAGER.config_without_managed_subagent_settings_text(updated, "child", "none")
+        self.assertNotIn("default_subagent_reasoning_effort", cleaned_text)
+        cleaned_parsed = MANAGER.parse_toml_text(cleaned_text)
+        self.assertEqual(
+            MANAGER.config_without_managed_subagent_settings(MANAGER.parse_toml_text(initial)),
+            MANAGER.config_without_managed_subagent_settings(cleaned_parsed),
+        )
     def test_adds_agents_table_without_changing_provider_url(self) -> None:
         before = self.paths.config.read_text(encoding="utf-8")
         updated = MANAGER.config_with_default_subagent_settings(before, "child-model", "high")
@@ -262,6 +308,23 @@ class ModelCatalogTests(ManagerTestCase):
 
 
 class SetupTests(ManagerTestCase):
+    def test_setup_forwards_none_reasoning_effort(self) -> None:
+        with patch.dict(os.environ, {
+            "CUSTOM_AGENT_MODEL": "child-none",
+            "CUSTOM_AGENT_REASONING_EFFORT": "none",
+            "CUSTOM_AGENT_VISION": "no"
+        }):
+            outcome = MANAGER.setup(
+                self.paths, "", True, None, None, None,
+                model_env=True, effort_env=True, vision_env=True
+            )
+        self.assertEqual(outcome["status"], "configured")
+        self.assertEqual(outcome["reasoning_effort"], "none")
+        self.assertEqual(outcome["default_subagent_reasoning_effort"], "none")
+        status = MANAGER.static_status(self.paths)
+        self.assertEqual(status["reasoning_effort"], "none")
+        self.assertEqual(status["default_subagent_reasoning_effort"], "none")
+
     def test_page_values_are_forwarded(self) -> None:
         with (
             patch.dict(

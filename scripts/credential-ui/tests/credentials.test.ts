@@ -67,7 +67,9 @@ test('下拉配置只接受声明中的选项', async () => {
   const m = memory(); const store = createStore(select, m.backend);
   const revision = (await store.status()).revision;
   await assert.rejects(store.save({ revision, value: 'ultra' }), /有效选项/);
-  await store.save({ revision, value: 'medium' });
+  await store.save({ revision, value: 'none' });
+  assert.equal(m.value(), 'none');
+  await store.save({ revision: (await store.status()).revision, value: 'medium', replaceExisting: true });
   assert.equal(m.value(), 'medium');
 });
 test('HTTP 认证、Host 和跨站保护、脱敏及默认单字段占位框', async t => {

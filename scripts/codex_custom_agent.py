@@ -39,7 +39,7 @@ SKILL_NAME = "deepseek"
 ROLE = "CustomAgent"
 AGENT_SANDBOX_MODE = "workspace-write"
 AGENT_EXECUTION_MODE = "isolated_git_worktree"
-REASONING_EFFORTS = {"low", "medium", "high"}
+REASONING_EFFORTS = {"none", "low", "medium", "high"}
 VISION_VALUES = {"yes", "no"}
 MODEL_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
 MANAGED_MARKER = "# managed-by = deepseek"
@@ -429,6 +429,7 @@ def catalog_model_entry(catalog: dict[str, Any], model: str) -> dict[str, Any] |
 
 def supported_reasoning_levels() -> list[dict[str, str]]:
     return [
+        {"effort": "none", "description": "Direct model response with reasoning disabled"},
         {"effort": "low", "description": "Fast responses with lighter reasoning"},
         {"effort": "medium", "description": "Balanced reasoning for general coding tasks"},
         {"effort": "high", "description": "Greater reasoning depth for coding and agent tasks"},

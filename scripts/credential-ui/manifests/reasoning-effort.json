@@ -6,7 +6,12 @@
   "ui": {
     "title": "配置 CustomAgent",
     "inputType": "select",
-    "options": ["low", "medium", "high"],
+    "options": [
+      "none",
+      "low",
+      "medium",
+      "high"
+    ],
     "saveLabel": "更新"
   }
 }

@@ -16,10 +16,14 @@ node <skill-dir>/scripts/credential-ui/src/profile.ts apply default --confirmed 
 | 字段 | 环境变量 | 可选值 |
 | --- | --- | --- |
 | 子代理模型 | `CUSTOM_AGENT_MODEL` | 精确模型 ID，无默认值 |
-| 思考强度 | `CUSTOM_AGENT_REASONING_EFFORT` | `low`、`medium`、`high` |
+| 思考强度 | `CUSTOM_AGENT_REASONING_EFFORT` | `none`、`low`、`medium`、`high` |
 | 支持识图 | `CUSTOM_AGENT_VISION` | `yes`、`no` |
 
+思考强度中，`none` 表示关闭思考/直接模型响应；`low`、`medium`、`high` 表示不同深度的推理思考。
+
 用户点击保存即确认应用所填值。`apply` 会自动等待保存、注入三个值、运行管理脚本并等待完整验收，不需要第二条聊天确认或后续手工命令。
+
+普通任务中派发子智能体使用已配置的思考强度（包括已配置的 `none`），不等于要求修改持久配置；默认派发不传递覆盖参数，禁止在日常任务执行时擅自编辑 `CustomAgent.toml` 或 `config.toml`。
 
 ## 精确写入范围
 

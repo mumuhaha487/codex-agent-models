@@ -41,8 +41,8 @@ test('真实 CLI：可创建带受限选项的下拉字段', async t => {
   const dir = await mkdtemp(path.join(tmpdir(), 'credential-configure-')); t.after(() => rm(dir, { recursive: true, force: true }));
   const file = path.join(dir, 'select.json');
   const result = await run(['--manifest', file, '--id', 'sample-select', '--label', '模式', '--credential', 'sample/select',
-    '--input-type', 'select', '--options', 'low,medium,high']);
+    '--input-type', 'select', '--options', 'none,low,medium,high']);
   assert.equal(result.code, 0);
   const configured = JSON.parse(await readFile(file, 'utf8'));
-  assert.deepEqual(configured.ui.options, ['low', 'medium', 'high']);
+  assert.deepEqual(configured.ui.options, ['none', 'low', 'medium', 'high']);
 });
